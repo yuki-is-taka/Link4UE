@@ -131,3 +131,5 @@ private: // Public Member Variables
 
 	bool bIsInitialized;
 };
+
+// Test Comment
