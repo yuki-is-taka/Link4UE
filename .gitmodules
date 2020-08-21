@@ -1,3 +1,4 @@
 [submodule "Source/ThirdParty/LinkLibrary/link"]
 	path = Source/ThirdParty/LinkLibrary/link
 	url = https://github.com/Ableton/link
+	ignore = dirty
