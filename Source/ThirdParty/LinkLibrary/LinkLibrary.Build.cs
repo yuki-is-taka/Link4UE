@@ -18,7 +18,7 @@ public class LinkLibrary : ModuleRules
 		}
         else if (Target.Platform == UnrealTargetPlatform.Mac)
         {
-			PublicDefinitions.Add("LINK_PLATFORM_OSX=1");
+			PublicDefinitions.Add("LINK_PLATFORM_MACOSX=1");
 		}
 		else if (Target.Platform == UnrealTargetPlatform.Linux)
         {
