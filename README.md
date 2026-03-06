@@ -36,4 +36,6 @@ The `--recursive` flag is required because Ableton Link itself contains a submod
 
 ## License
 
-See Ableton Link's [license](https://github.com/Ableton/link/blob/master/LICENSE.md) for details on the dual licensing model.
+Link4UE is licensed under the [GNU General Public License v2 or later](LICENSE).
+
+See also Ableton Link's [license](https://github.com/Ableton/link/blob/master/LICENSE.md) for details on the dual licensing model.
