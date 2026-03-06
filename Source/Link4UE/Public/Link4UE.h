@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
 
-class FLinkForUnrealModule : public IModuleInterface
+class FLink4UEModule : public IModuleInterface
 {
 public:
 

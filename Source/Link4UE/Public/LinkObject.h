@@ -20,7 +20,7 @@ namespace ableton { class Link; }
  * 
  */
 UCLASS()
-class LINKFORUNREAL_API ULinkObject : public UObject
+class LINK4UE_API ULinkObject : public UObject
 {
 	GENERATED_BODY()
 

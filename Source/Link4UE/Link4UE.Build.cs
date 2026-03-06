@@ -2,9 +2,9 @@
 
 using UnrealBuildTool;
 
-public class LinkForUnreal : ModuleRules
+public class Link4UE : ModuleRules
 {
-	public LinkForUnreal(ReadOnlyTargetRules Target) : base(Target)
+	public Link4UE(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 		

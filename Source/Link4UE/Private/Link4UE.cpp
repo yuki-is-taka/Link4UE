@@ -1,15 +1,15 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "LinkForUnreal.h"
+#include "Link4UE.h"
 
-#define LOCTEXT_NAMESPACE "FLinkForUnrealModule"
+#define LOCTEXT_NAMESPACE "FLink4UEModule"
 
-void FLinkForUnrealModule::StartupModule()
+void FLink4UEModule::StartupModule()
 {
 	// This code will execute after your module is loaded into memory; the exact timing is specified in the .uplugin file per-module
 }
 
-void FLinkForUnrealModule::ShutdownModule()
+void FLink4UEModule::ShutdownModule()
 {
 	// This function may be called during shutdown to clean up your module.  For modules that support dynamic reloading,
 	// we call this function before unloading the module.
@@ -17,4 +17,4 @@ void FLinkForUnrealModule::ShutdownModule()
 
 #undef LOCTEXT_NAMESPACE
 	
-IMPLEMENT_MODULE(FLinkForUnrealModule, LinkForUnreal)
+IMPLEMENT_MODULE(FLink4UEModule, Link4UE)

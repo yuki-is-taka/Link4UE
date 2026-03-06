@@ -2,8 +2,8 @@
 	"FileVersion": 3,
 	"Version": 1,
 	"VersionName": "1.0",
-	"FriendlyName": "LinkForUnreal",
-	"Description": "Ableton Link for UnrealEngine4",
+	"FriendlyName": "Link4UE",
+	"Description": "Ableton Link for Unreal Engine",
 	"Category": "Other",
 	"CreatedBy": "Tokyologist",
 	"CreatedByURL": "",
@@ -16,7 +16,7 @@
 	"Installed": false,
 	"Modules": [
 		{
-			"Name": "LinkForUnreal",
+			"Name": "Link4UE",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		}
