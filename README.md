@@ -31,7 +31,7 @@ The `--recursive` flag is required because Ableton Link itself contains a submod
 
 ## Third-Party
 
-- [Ableton Link 3.1.5](https://github.com/Ableton/link) (GPLv2+ / proprietary dual license)
+- [Ableton Link 4.0.0-beta.2](https://github.com/Ableton/link) (GPLv2+ / proprietary dual license)
   - [ASIO standalone 1.36.0](https://github.com/chriskohlhoff/asio) (Boost Software License)
 
 ## License
