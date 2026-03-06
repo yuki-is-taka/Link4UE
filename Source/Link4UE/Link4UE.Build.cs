@@ -11,6 +11,7 @@ public class Link4UE : ModuleRules
 			{
 				"Core",
 				"DeveloperSettings",
+				"Engine",
 				"LinkLibrary",
 			}
 		);
@@ -19,7 +20,8 @@ public class Link4UE : ModuleRules
 			new string[]
 			{
 				"CoreUObject",
-				"Engine",
+				"AudioMixer",
+				"SignalProcessing",
 			}
 		);
 	}

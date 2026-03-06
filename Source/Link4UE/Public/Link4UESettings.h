@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Sound/SoundSubmix.h"
 #include "Engine/DeveloperSettings.h"
 #include "Link4UESettings.generated.h"
 
@@ -27,6 +28,44 @@ enum class ELink4UEQuantum : uint8
 
 /** Convert a quantum preset to its beat value. */
 LINK4UE_API double Link4UEQuantumToBeats(ELink4UEQuantum Preset);
+
+/** Defines a Submix → LinkAudio send route. */
+USTRUCT(BlueprintType)
+struct LINK4UE_API FLink4UEAudioSend
+{
+	GENERATED_BODY()
+
+	/** Source Submix to capture audio from. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	TSoftObjectPtr<USoundSubmix> Submix;
+
+	/** Channel name prefix advertised to peers.
+	 *  Empty = use the Submix asset name.
+	 *  For Submixes with 3+ channels, mono Sinks are named "{Prefix}_{index}". */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	FString ChannelNamePrefix;
+};
+
+/** Defines a LinkAudio → Submix receive route. */
+USTRUCT(BlueprintType)
+struct LINK4UE_API FLink4UEAudioReceive
+{
+	GENERATED_BODY()
+
+	/** LinkAudio channel name to subscribe to. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	FString ChannelName;
+
+	/** Target Submix to inject received audio into. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	TSoftObjectPtr<USoundSubmix> Submix;
+
+	/** Target channel index within the Submix (0-based).
+	 *  -1 = replicate to all channels. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE", meta = (
+		ClampMin = "-1"))
+	int32 SubmixChannelIndex = -1;
+};
 
 DECLARE_MULTICAST_DELEGATE(FLink4UEOnSettingsChanged);
 
@@ -85,4 +124,16 @@ public:
 	UPROPERTY(Config, EditAnywhere, Category = "Defaults", meta = (
 		DisplayName = "Default Quantum"))
 	ELink4UEQuantum DefaultQuantum = ELink4UEQuantum::Bar_1;
+
+	// --- Audio Routing ---
+
+	/** Submixes to send to the Link Audio network. */
+	UPROPERTY(Config, EditAnywhere, Category = "Audio Routing", meta = (
+		DisplayName = "Audio Sends"))
+	TArray<FLink4UEAudioSend> AudioSends;
+
+	/** Link Audio channels to receive and inject into Submixes. */
+	UPROPERTY(Config, EditAnywhere, Category = "Audio Routing", meta = (
+		DisplayName = "Audio Receives"))
+	TArray<FLink4UEAudioReceive> AudioReceives;
 };
