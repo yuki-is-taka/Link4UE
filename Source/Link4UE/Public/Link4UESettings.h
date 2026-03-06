@@ -6,6 +6,28 @@
 #include "Engine/DeveloperSettings.h"
 #include "Link4UESettings.generated.h"
 
+/** Quantum presets — matches Ableton Live's global quantization options. */
+UENUM(BlueprintType)
+enum class ELink4UEQuantum : uint8
+{
+	Bars_8		UMETA(DisplayName = "8 Bars"),
+	Bars_4		UMETA(DisplayName = "4 Bars"),
+	Bars_2		UMETA(DisplayName = "2 Bars"),
+	Bar_1		UMETA(DisplayName = "1 Bar"),
+	Half		UMETA(DisplayName = "1/2"),
+	HalfT		UMETA(DisplayName = "1/2T"),
+	Quarter		UMETA(DisplayName = "1/4"),
+	QuarterT	UMETA(DisplayName = "1/4T"),
+	Eighth		UMETA(DisplayName = "1/8"),
+	EighthT		UMETA(DisplayName = "1/8T"),
+	Sixteenth	UMETA(DisplayName = "1/16"),
+	SixteenthT	UMETA(DisplayName = "1/16T"),
+	ThirtySecond UMETA(DisplayName = "1/32"),
+};
+
+/** Convert a quantum preset to its beat value. */
+LINK4UE_API double Link4UEQuantumToBeats(ELink4UEQuantum Preset);
+
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Link4UE"))
 class LINK4UE_API ULink4UESettings : public UDeveloperSettings
 {
@@ -41,10 +63,9 @@ public:
 		ClampMin = "20.0", ClampMax = "999.0"))
 	double DefaultTempo = 120.0;
 
-	/** Beats per bar used for phase calculation.
-	 *  4.0 corresponds to 4/4 time. */
+	/** Phase synchronization unit.
+	 *  Matches Ableton Live's global quantization options. */
 	UPROPERTY(Config, EditAnywhere, Category = "Defaults", meta = (
-		DisplayName = "Default Quantum",
-		ClampMin = "1.0"))
-	double DefaultQuantum = 4.0;
+		DisplayName = "Default Quantum"))
+	ELink4UEQuantum DefaultQuantum = ELink4UEQuantum::Bar_1;
 };

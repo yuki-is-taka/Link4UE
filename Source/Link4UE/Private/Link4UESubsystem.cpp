@@ -41,9 +41,10 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 	// Read settings
 	const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
+	const double QuantumBeats = Link4UEQuantumToBeats(Settings->DefaultQuantum);
 	Snapshot.Tempo = Settings->DefaultTempo;
-	Snapshot.Quantum = Settings->DefaultQuantum;
-	Quantum.store(Settings->DefaultQuantum, std::memory_order_relaxed);
+	Snapshot.Quantum = QuantumBeats;
+	Quantum.store(QuantumBeats, std::memory_order_relaxed);
 
 	LinkInstance = new FLinkInstance(Settings->DefaultTempo);
 
@@ -118,6 +119,23 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	Snapshot.NumPeers = static_cast<int32>(LinkInstance->Link.numPeers());
 	Snapshot.Quantum = Q;
 
+	// Beat / Phase-zero edge detection
+	const int32 CurBeatFloor = FMath::FloorToInt32(Snapshot.Beat);
+	if (PrevBeatFloor >= 0 && CurBeatFloor > PrevBeatFloor)
+	{
+		// Fire for each beat crossed (handles multiple beats per frame)
+		for (int32 B = PrevBeatFloor + 1; B <= CurBeatFloor; ++B)
+		{
+			const bool bPhaseZero = FMath::IsNearlyZero(FMath::Fmod(static_cast<double>(B), Q), 0.001);
+			OnBeat.Broadcast(B, bPhaseZero);
+			if (bPhaseZero)
+			{
+				OnPhaseZero.Broadcast();
+			}
+		}
+	}
+	PrevBeatFloor = CurBeatFloor;
+
 	// Dispatch callbacks accumulated from Link thread
 	if (bNumPeersDirty.exchange(false, std::memory_order_acquire))
 	{
@@ -136,6 +154,20 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 }
 
 // ---------------------------------------------------------------------------
+// Query
+// ---------------------------------------------------------------------------
+
+double ULink4UESubsystem::GetTimeAtBeat(double Beat) const
+{
+	if (!LinkInstance) return 0.0;
+
+	const auto State = LinkInstance->Link.captureAppSessionState();
+	const double Q = Quantum.load(std::memory_order_relaxed);
+	const auto Micros = State.timeAtBeat(Beat, Q);
+	return std::chrono::duration<double>(Micros).count();
+}
+
+// ---------------------------------------------------------------------------
 // Mutators
 // ---------------------------------------------------------------------------
 
@@ -151,6 +183,11 @@ void ULink4UESubsystem::SetTempo(double BPM)
 void ULink4UESubsystem::SetQuantum(double InQuantum)
 {
 	Quantum.store(InQuantum, std::memory_order_relaxed);
+}
+
+void ULink4UESubsystem::SetQuantumPreset(ELink4UEQuantum Preset)
+{
+	Quantum.store(Link4UEQuantumToBeats(Preset), std::memory_order_relaxed);
 }
 
 void ULink4UESubsystem::SetIsPlaying(bool bPlay)

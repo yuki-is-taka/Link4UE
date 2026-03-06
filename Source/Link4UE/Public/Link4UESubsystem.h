@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/EngineSubsystem.h"
+#include "Link4UESettings.h"
 #include "Link4UESubsystem.generated.h"
 
 /** Snapshot of Link session state, captured once per frame. */
@@ -41,6 +42,8 @@ struct LINK4UE_API FLink4UESessionSnapshot
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnNumPeersChanged, int32, NumPeers);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnTempoChanged, double, BPM);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnStartStopChanged, bool, bIsPlaying);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FLink4UEOnBeat, int32, BeatNumber, bool, bIsPhaseZero);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FLink4UEOnPhaseZero);
 
 /**
  * Engine-lifetime subsystem that owns the Ableton Link instance.
@@ -65,6 +68,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Link4UE")
 	const FLink4UESessionSnapshot& GetSessionSnapshot() const { return Snapshot; }
 
+	/** Returns the time (in seconds) at which the given beat will occur.
+	 *  Useful for scheduling events ahead of time (e.g. "next bar starts in X seconds"). */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE")
+	double GetTimeAtBeat(double Beat) const;
+
 	// --- Mutators (GameThread, thread-safe via Link API) ---
 
 	UFUNCTION(BlueprintCallable, Category = "Link4UE")
@@ -72,6 +80,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Link4UE")
 	void SetQuantum(double InQuantum);
+
+	UFUNCTION(BlueprintCallable, Category = "Link4UE", meta = (DisplayName = "Set Quantum (Preset)"))
+	void SetQuantumPreset(ELink4UEQuantum Preset);
 
 	UFUNCTION(BlueprintCallable, Category = "Link4UE")
 	void SetIsPlaying(bool bPlay);
@@ -107,6 +118,15 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Link4UE")
 	FLink4UEOnStartStopChanged OnStartStopChanged;
 
+	/** Fired each time a beat boundary is crossed. BeatNumber is the integer beat,
+	 *  bIsPhaseZero is true when this beat is also a quantum boundary (bar start). */
+	UPROPERTY(BlueprintAssignable, Category = "Link4UE|Beat")
+	FLink4UEOnBeat OnBeat;
+
+	/** Fired when a quantum boundary (phase == 0) is crossed — i.e. the start of a bar. */
+	UPROPERTY(BlueprintAssignable, Category = "Link4UE|Beat")
+	FLink4UEOnPhaseZero OnPhaseZero;
+
 private:
 	/** Per-frame tick driven by FTSTicker. */
 	bool Tick(float DeltaTime);
@@ -126,6 +146,9 @@ private:
 	std::atomic<bool> bNumPeersDirty{false};
 	std::atomic<bool> bTempoDirty{false};
 	std::atomic<bool> bStartStopDirty{false};
+
+	/** Previous beat floor — used for beat/phase-zero edge detection. */
+	int32 PrevBeatFloor = -1;
 
 	/** Opaque Link instance — forward declared to keep Link headers out of public API.
 	 *  Raw pointer because UHT-generated code instantiates TUniquePtr destructor
