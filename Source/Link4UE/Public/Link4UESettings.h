@@ -54,6 +54,18 @@ public:
 		DisplayName = "Start/Stop Sync"))
 	bool bStartStopSync = true;
 
+	// --- LinkAudio ---
+
+	/** Enable Link Audio channel streaming on startup. */
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Enable Link Audio"))
+	bool bEnableLinkAudio = false;
+
+	/** Display name advertised to other Link Audio peers. */
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Peer Name"))
+	FString PeerName = TEXT("Unreal");
+
 	// --- Defaults ---
 
 	/** Initial tempo (BPM) used when creating the Link session.

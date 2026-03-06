@@ -38,12 +38,36 @@ struct LINK4UE_API FLink4UESessionSnapshot
 	double Quantum = 4.0;
 };
 
+/** Describes an audio channel visible in the Link Audio session. */
+USTRUCT(BlueprintType)
+struct LINK4UE_API FLink4UEChannel
+{
+	GENERATED_BODY()
+
+	/** Unique channel identifier (hex string). */
+	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
+	FString ChannelId;
+
+	/** Display name of the channel. */
+	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
+	FString Name;
+
+	/** Unique peer identifier (hex string). */
+	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
+	FString PeerId;
+
+	/** Display name of the peer providing the channel. */
+	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
+	FString PeerName;
+};
+
 // Delegates — fired on GameThread
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnNumPeersChanged, int32, NumPeers);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnTempoChanged, double, BPM);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLink4UEOnStartStopChanged, bool, bIsPlaying);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FLink4UEOnBeat, int32, BeatNumber, bool, bIsPhaseZero);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FLink4UEOnPhaseZero);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FLink4UEOnChannelsChanged);
 
 /**
  * Engine-lifetime subsystem that owns the Ableton Link instance.
@@ -107,6 +131,21 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Link4UE")
 	bool IsStartStopSyncEnabled() const;
 
+	// --- LinkAudio ---
+
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	void EnableLinkAudio(bool bEnable);
+
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	bool IsLinkAudioEnabled() const;
+
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	void SetPeerName(const FString& InPeerName);
+
+	/** Returns the list of audio channels currently visible in the session. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	TArray<FLink4UEChannel> GetChannels() const;
+
 	// --- Delegates ---
 
 	UPROPERTY(BlueprintAssignable, Category = "Link4UE")
@@ -127,6 +166,10 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Link4UE|Beat")
 	FLink4UEOnPhaseZero OnPhaseZero;
 
+	/** Fired when the set of Link Audio channels changes (peer joins/leaves/renames). */
+	UPROPERTY(BlueprintAssignable, Category = "Link4UE|Audio")
+	FLink4UEOnChannelsChanged OnChannelsChanged;
+
 private:
 	/** Per-frame tick driven by FTSTicker. */
 	bool Tick(float DeltaTime);
@@ -146,6 +189,7 @@ private:
 	std::atomic<bool> bNumPeersDirty{false};
 	std::atomic<bool> bTempoDirty{false};
 	std::atomic<bool> bStartStopDirty{false};
+	std::atomic<bool> bChannelsDirty{false};
 
 	/** Previous beat floor — used for beat/phase-zero edge detection. */
 	int32 PrevBeatFloor = -1;

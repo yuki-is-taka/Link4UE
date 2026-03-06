@@ -2,19 +2,33 @@
 
 #include "Link4UESubsystem.h"
 #include "Link4UESettings.h"
-#include "ableton/Link.hpp"
+#include "ableton/LinkAudio.hpp"
+
+namespace
+{
+	FString NodeIdToHex(const ableton::link::NodeId& Id)
+	{
+		FString Out;
+		Out.Reserve(16);
+		for (uint8 Byte : Id)
+		{
+			Out += FString::Printf(TEXT("%02x"), Byte);
+		}
+		return Out;
+	}
+}
 
 DEFINE_LOG_CATEGORY_STATIC(LogLink4UE, Log, All);
 
 // ---------------------------------------------------------------------------
-// Pimpl — hides ableton::Link from the header
+// Pimpl — hides ableton::LinkAudio from the header
 // ---------------------------------------------------------------------------
 struct ULink4UESubsystem::FLinkInstance
 {
-	ableton::Link Link;
+	ableton::LinkAudio Link;
 
-	explicit FLinkInstance(double BPM)
-		: Link(BPM)
+	FLinkInstance(double BPM, const std::string& PeerName)
+		: Link(BPM, PeerName)
 	{
 	}
 };
@@ -46,7 +60,8 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	Snapshot.Quantum = QuantumBeats;
 	Quantum.store(QuantumBeats, std::memory_order_relaxed);
 
-	LinkInstance = new FLinkInstance(Settings->DefaultTempo);
+	LinkInstance = new FLinkInstance(Settings->DefaultTempo,
+		TCHAR_TO_UTF8(*Settings->PeerName));
 
 	// Register Link-thread callbacks — store values atomically, consume on GameThread
 	LinkInstance->Link.setNumPeersCallback([this](std::size_t InNumPeers)
@@ -71,15 +86,27 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	TickHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateUObject(this, &ULink4UESubsystem::Tick));
 
+	// LinkAudio channels-changed callback
+	LinkInstance->Link.setChannelsChangedCallback([this]()
+	{
+		bChannelsDirty.store(true, std::memory_order_release);
+	});
+
 	// Apply settings
 	LinkInstance->Link.enableStartStopSync(Settings->bStartStopSync);
+	if (Settings->bEnableLinkAudio)
+	{
+		LinkInstance->Link.enableLinkAudio(true);
+	}
 	if (Settings->bAutoConnect)
 	{
 		LinkInstance->Link.enable(true);
 	}
 
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem initialized (tempo=%.1f, auto=%s)"),
-		Settings->DefaultTempo, Settings->bAutoConnect ? TEXT("on") : TEXT("off"));
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem initialized (tempo=%.1f, auto=%s, audio=%s)"),
+		Settings->DefaultTempo,
+		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
+		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"));
 }
 
 void ULink4UESubsystem::Deinitialize()
@@ -88,6 +115,7 @@ void ULink4UESubsystem::Deinitialize()
 
 	if (LinkInstance)
 	{
+		LinkInstance->Link.enableLinkAudio(false);
 		LinkInstance->Link.enable(false);
 		delete LinkInstance;
 		LinkInstance = nullptr;
@@ -148,6 +176,10 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	if (bStartStopDirty.exchange(false, std::memory_order_acquire))
 	{
 		OnStartStopChanged.Broadcast(PendingIsPlaying.load(std::memory_order_relaxed));
+	}
+	if (bChannelsDirty.exchange(false, std::memory_order_acquire))
+	{
+		OnChannelsChanged.Broadcast();
 	}
 
 	return true; // keep ticking
@@ -259,4 +291,53 @@ void ULink4UESubsystem::EnableStartStopSync(bool bEnable)
 bool ULink4UESubsystem::IsStartStopSyncEnabled() const
 {
 	return LinkInstance && LinkInstance->Link.isStartStopSyncEnabled();
+}
+
+// ---------------------------------------------------------------------------
+// LinkAudio
+// ---------------------------------------------------------------------------
+
+void ULink4UESubsystem::EnableLinkAudio(bool bEnable)
+{
+	if (LinkInstance)
+	{
+		LinkInstance->Link.enableLinkAudio(bEnable);
+		UE_LOG(LogLink4UE, Log, TEXT("Link Audio %s"), bEnable ? TEXT("enabled") : TEXT("disabled"));
+	}
+}
+
+bool ULink4UESubsystem::IsLinkAudioEnabled() const
+{
+	return LinkInstance && LinkInstance->Link.isLinkAudioEnabled();
+}
+
+void ULink4UESubsystem::SetPeerName(const FString& InPeerName)
+{
+	if (LinkInstance)
+	{
+		LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*InPeerName));
+	}
+}
+
+TArray<FLink4UEChannel> ULink4UESubsystem::GetChannels() const
+{
+	TArray<FLink4UEChannel> Result;
+	if (!LinkInstance)
+	{
+		return Result;
+	}
+
+	const auto Channels = LinkInstance->Link.channels();
+	Result.Reserve(static_cast<int32>(Channels.size()));
+
+	for (const auto& Ch : Channels)
+	{
+		FLink4UEChannel& Out = Result.AddDefaulted_GetRef();
+		Out.ChannelId = NodeIdToHex(Ch.id);
+		Out.Name = UTF8_TO_TCHAR(Ch.name.c_str());
+		Out.PeerId = NodeIdToHex(Ch.peerId);
+		Out.PeerName = UTF8_TO_TCHAR(Ch.peerName.c_str());
+	}
+
+	return Result;
 }
