@@ -19,19 +19,15 @@ Synchronizes musical beat, tempo, and phase across multiple applications on a lo
 
 ## Setup
 
-This plugin is automatically cloned by the project's `setup-plugins.py` bootstrap script:
+Clone into your project's `Plugins/` directory and initialize submodules:
 
 ```bash
-python setup-plugins.py
-```
-
-The Ableton Link library is included as a git submodule under `Source/ThirdParty/LinkLibrary/link/`. After cloning, initialize it with:
-
-```bash
+git clone https://github.com/yuki-is-taka/Link4UE.git Plugins/Link4UE
+cd Plugins/Link4UE
 git submodule update --init --recursive
 ```
 
-The bootstrap script handles this automatically.
+The `--recursive` flag is required because Ableton Link itself contains a submodule (ASIO standalone).
 
 ## Third-Party
 
