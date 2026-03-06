@@ -1,5 +1,6 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
+#if 0 // TODO: Rewrite for Link4UE
 
 #include "LinkObject.h"
 #include "ableton/Link.hpp"
@@ -132,7 +133,7 @@ bool ULinkObject::IsPlaying() const
 float ULinkObject::BeatAtTime() const
 {
 	if(LinkPtr)
-	{ 
+	{
 		auto sessionState = LinkPtr->captureAppSessionState();
 		return static_cast<float>(sessionState.beatAtTime(Now(), Quantum));
 	}
@@ -222,3 +223,5 @@ std::chrono::microseconds ULinkObject::Now() const
 	}
 	return std::chrono::microseconds();
 }
+
+#endif // TODO: Rewrite for Link4UE

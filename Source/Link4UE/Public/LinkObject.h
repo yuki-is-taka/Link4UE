@@ -2,11 +2,13 @@
 
 #pragma once
 
-#include <chrono>
-
 #include "CoreMinimal.h"
 #include "UObject/NoExportTypes.h"
 #include "LinkObject.generated.h"
+
+#if 0 // TODO: Rewrite for Link4UE
+
+#include <chrono>
 
 // Delegates
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLinkOnNumPeersUpdate, int, NumPeers);
@@ -17,7 +19,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FLinkOnStartStopUpdate, bool, bIsPla
 namespace ableton { class Link; }
 
 /**
- * 
+ *
  */
 UCLASS()
 class LINK4UE_API ULinkObject : public UObject
@@ -132,4 +134,4 @@ private: // Public Member Variables
 	bool bIsInitialized;
 };
 
-// Test Comment
+#endif // TODO: Rewrite for Link4UE
