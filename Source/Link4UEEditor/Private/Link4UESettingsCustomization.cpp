@@ -1,4 +1,4 @@
-// Copyright Tokyologist. All Rights Reserved.
+// Copyright YUKITAKA. All Rights Reserved.
 
 #include "Link4UESettingsCustomization.h"
 #include "DetailCategoryBuilder.h"

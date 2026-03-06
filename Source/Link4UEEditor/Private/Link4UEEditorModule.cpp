@@ -1,4 +1,4 @@
-// Copyright Tokyologist. All Rights Reserved.
+// Copyright YUKITAKA. All Rights Reserved.
 
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
