@@ -13,6 +13,7 @@ public class Link4UEEditor : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"InputCore",
 			"Slate",
 			"SlateCore",
 			"PropertyEditor",

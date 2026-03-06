@@ -17,6 +17,11 @@ public:
 			ULink4UESettings::StaticClass()->GetFName(),
 			FOnGetDetailCustomizationInstance::CreateStatic(
 				&FLink4UESettingsCustomization::MakeInstance));
+
+		PropertyModule.RegisterCustomPropertyTypeLayout(
+			TEXT("Link4UEAudioReceive"),
+			FOnGetPropertyTypeCustomizationInstance::CreateStatic(
+				&FLink4UEAudioReceiveCustomization::MakeInstance));
 	}
 
 	virtual void ShutdownModule() override
@@ -27,6 +32,8 @@ public:
 				FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 			PropertyModule.UnregisterCustomClassLayout(
 				ULink4UESettings::StaticClass()->GetFName());
+			PropertyModule.UnregisterCustomPropertyTypeLayout(
+				TEXT("Link4UEAudioReceive"));
 		}
 	}
 };
