@@ -19,6 +19,11 @@
 			"Name": "Link4UE",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "Link4UEEditor",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }

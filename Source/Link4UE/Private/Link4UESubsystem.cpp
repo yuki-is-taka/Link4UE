@@ -1,6 +1,7 @@
 // Copyright Tokyologist. All Rights Reserved.
 
 #include "Link4UESubsystem.h"
+#include "Link4UESettings.h"
 #include "ableton/Link.hpp"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLink4UE, Log, All);
@@ -38,7 +39,13 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	LinkInstance = new FLinkInstance(Snapshot.Tempo);
+	// Read settings
+	const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
+	Snapshot.Tempo = Settings->DefaultTempo;
+	Snapshot.Quantum = Settings->DefaultQuantum;
+	Quantum.store(Settings->DefaultQuantum, std::memory_order_relaxed);
+
+	LinkInstance = new FLinkInstance(Settings->DefaultTempo);
 
 	// Register Link-thread callbacks — store values atomically, consume on GameThread
 	LinkInstance->Link.setNumPeersCallback([this](std::size_t InNumPeers)
@@ -63,7 +70,15 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	TickHandle = FTSTicker::GetCoreTicker().AddTicker(
 		FTickerDelegate::CreateUObject(this, &ULink4UESubsystem::Tick));
 
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem initialized (tempo=%.1f)"), Snapshot.Tempo);
+	// Apply settings
+	LinkInstance->Link.enableStartStopSync(Settings->bStartStopSync);
+	if (Settings->bAutoConnect)
+	{
+		LinkInstance->Link.enable(true);
+	}
+
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem initialized (tempo=%.1f, auto=%s)"),
+		Settings->DefaultTempo, Settings->bAutoConnect ? TEXT("on") : TEXT("off"));
 }
 
 void ULink4UESubsystem::Deinitialize()
