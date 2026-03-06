@@ -171,6 +171,14 @@ public:
 	FLink4UEOnChannelsChanged OnChannelsChanged;
 
 private:
+	/** Apply all settings to the Link instance. */
+	void ApplySettings(const ULink4UESettings* Settings);
+
+#if WITH_EDITOR
+	void OnSettingsChanged();
+	FDelegateHandle SettingsChangedHandle;
+#endif
+
 	/** Per-frame tick driven by FTSTicker. */
 	bool Tick(float DeltaTime);
 

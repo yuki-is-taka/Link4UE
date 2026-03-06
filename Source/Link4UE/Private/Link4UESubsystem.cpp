@@ -93,24 +93,19 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	});
 
 	// Apply settings
-	LinkInstance->Link.enableStartStopSync(Settings->bStartStopSync);
-	if (Settings->bEnableLinkAudio)
-	{
-		LinkInstance->Link.enableLinkAudio(true);
-	}
-	if (Settings->bAutoConnect)
-	{
-		LinkInstance->Link.enable(true);
-	}
+	ApplySettings(Settings);
 
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem initialized (tempo=%.1f, auto=%s, audio=%s)"),
-		Settings->DefaultTempo,
-		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
-		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"));
+#if WITH_EDITOR
+	SettingsChangedHandle = ULink4UESettings::OnSettingsChanged.AddUObject(
+		this, &ULink4UESubsystem::OnSettingsChanged);
+#endif
 }
 
 void ULink4UESubsystem::Deinitialize()
 {
+#if WITH_EDITOR
+	ULink4UESettings::OnSettingsChanged.Remove(SettingsChangedHandle);
+#endif
 	FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 
 	if (LinkInstance)
@@ -124,6 +119,41 @@ void ULink4UESubsystem::Deinitialize()
 	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem deinitialized"));
 	Super::Deinitialize();
 }
+
+// ---------------------------------------------------------------------------
+// Settings hot-reload
+// ---------------------------------------------------------------------------
+
+void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
+{
+	if (!LinkInstance || !Settings)
+	{
+		return;
+	}
+
+	LinkInstance->Link.enableStartStopSync(Settings->bStartStopSync);
+	LinkInstance->Link.enableLinkAudio(Settings->bEnableLinkAudio);
+	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*Settings->PeerName));
+	LinkInstance->Link.enable(Settings->bAutoConnect);
+
+	const double Q = Link4UEQuantumToBeats(Settings->DefaultQuantum);
+	Quantum.store(Q, std::memory_order_relaxed);
+
+	SetTempo(Settings->DefaultTempo);
+
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE settings applied (tempo=%.1f, auto=%s, audio=%s, peer=%s)"),
+		Settings->DefaultTempo,
+		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
+		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"),
+		*Settings->PeerName);
+}
+
+#if WITH_EDITOR
+void ULink4UESubsystem::OnSettingsChanged()
+{
+	ApplySettings(GetDefault<ULink4UESettings>());
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Tick — capture session state & dispatch delegates

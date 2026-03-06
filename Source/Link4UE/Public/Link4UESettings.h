@@ -28,6 +28,8 @@ enum class ELink4UEQuantum : uint8
 /** Convert a quantum preset to its beat value. */
 LINK4UE_API double Link4UEQuantumToBeats(ELink4UEQuantum Preset);
 
+DECLARE_MULTICAST_DELEGATE(FLink4UEOnSettingsChanged);
+
 UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Link4UE"))
 class LINK4UE_API ULink4UESettings : public UDeveloperSettings
 {
@@ -39,6 +41,9 @@ public:
 #if WITH_EDITOR
 	virtual FText GetSectionText() const override;
 	virtual FText GetSectionDescription() const override;
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+
+	static FLink4UEOnSettingsChanged OnSettingsChanged;
 #endif
 
 	// --- Connection ---

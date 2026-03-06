@@ -24,6 +24,14 @@ double Link4UEQuantumToBeats(ELink4UEQuantum Preset)
 }
 
 #if WITH_EDITOR
+FLink4UEOnSettingsChanged ULink4UESettings::OnSettingsChanged;
+
+void ULink4UESettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+	OnSettingsChanged.Broadcast();
+}
+
 FText ULink4UESettings::GetSectionText() const
 {
 	return NSLOCTEXT("Link4UE", "SettingsSection", "Link4UE");
