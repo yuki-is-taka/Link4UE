@@ -13,9 +13,9 @@ Synchronizes musical beat, tempo, and phase across multiple applications on a lo
 
 | Platform | Status |
 |----------|--------|
-| Windows  | Supported |
-| macOS    | Supported |
-| Linux    | Supported |
+| Windows  | Untested |
+| macOS    | Untested |
+| Linux    | Untested |
 
 ## Setup
 

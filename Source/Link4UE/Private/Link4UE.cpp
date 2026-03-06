@@ -2,9 +2,6 @@
 
 #include "Link4UE.h"
 
-// Build test: verify Link headers compile correctly with UE
-#include "ableton/Link.hpp"
-
 #define LOCTEXT_NAMESPACE "FLink4UEModule"
 
 void FLink4UEModule::StartupModule()
