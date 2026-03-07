@@ -174,6 +174,9 @@ private:
 	/** Apply all settings to the Link instance. */
 	void ApplySettings(const ULink4UESettings* Settings);
 
+	/** Rebuild send/receive audio routes from settings. */
+	void RebuildAudioRoutes(const ULink4UESettings* Settings);
+
 #if WITH_EDITOR
 	void OnSettingsChanged();
 	FDelegateHandle SettingsChangedHandle;

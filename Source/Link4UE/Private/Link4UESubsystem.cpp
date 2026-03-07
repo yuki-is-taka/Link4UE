@@ -68,10 +68,12 @@ public:
 		const int32 LinkChannels = FMath::Min(NumChannels, 2);
 		const int32 TotalLinkSamples = NumFrames * LinkChannels;
 
-		// Ensure Sink buffer is large enough
-		if (static_cast<size_t>(TotalLinkSamples) > Sink.maxNumSamples())
+		// Ensure Sink buffer is large enough (cached to avoid per-callback API call)
+		const size_t RequiredSamples = static_cast<size_t>(TotalLinkSamples);
+		if (RequiredSamples > CachedMaxSamples)
 		{
-			Sink.requestMaxNumSamples(static_cast<size_t>(TotalLinkSamples));
+			Sink.requestMaxNumSamples(RequiredSamples);
+			CachedMaxSamples = RequiredSamples;
 		}
 
 		ableton::LinkAudioSink::BufferHandle Buffer(Sink);
@@ -126,6 +128,7 @@ private:
 	ableton::LinkAudio& LinkRef;
 	const std::atomic<double>& QuantumRef;
 	FString ListenerName;
+	size_t CachedMaxSamples = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -372,6 +375,22 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 
 	SetTempo(Settings->DefaultTempo);
 
+	RebuildAudioRoutes(Settings);
+
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE settings applied (tempo=%.1f, auto=%s, audio=%s, peer=%s)"),
+		Settings->DefaultTempo,
+		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
+		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"),
+		*Settings->PeerName);
+}
+
+void ULink4UESubsystem::RebuildAudioRoutes(const ULink4UESettings* Settings)
+{
+	if (!LinkInstance || !Settings)
+	{
+		return;
+	}
+
 	// --- Rebuild send routes ---
 	LinkInstance->TearDownSends();
 
@@ -425,6 +444,7 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 		Audio::FMixerDevice* MixerDevice = nullptr;
 		{
 			FAudioDevice* AudioDevice = GetMainAudioDevice();
+			// UE5 always uses FMixerDevice — safe to static_cast
 			if (AudioDevice)
 			{
 				MixerDevice = static_cast<Audio::FMixerDevice*>(AudioDevice);
@@ -500,12 +520,6 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 				TEXT("Link4UE: MixerDevice not available — receive routes deferred"));
 		}
 	}
-
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE settings applied (tempo=%.1f, auto=%s, audio=%s, peer=%s)"),
-		Settings->DefaultTempo,
-		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
-		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"),
-		*Settings->PeerName);
 }
 
 #if WITH_EDITOR
