@@ -23,7 +23,7 @@ Synchronizes musical beat, tempo, phase, and audio streams across multiple appli
 
 | Platform | Status |
 |----------|--------|
-| macOS    | Tested |
+| macOS    | Builds |
 | Windows  | Untested |
 | Linux    | Untested |
 
