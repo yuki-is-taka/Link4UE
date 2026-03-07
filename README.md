@@ -1,8 +1,18 @@
 # Link4UE
 
-[Ableton Link](https://github.com/Ableton/link) plugin for Unreal Engine.
+[Ableton Link](https://github.com/Ableton/link) and LinkAudio plugin for Unreal Engine.
 
-Synchronizes musical beat, tempo, and phase across multiple applications on a local network.
+Synchronizes musical beat, tempo, phase, and audio streams across multiple applications on a local network.
+
+## Features
+
+- **Link sync** — shared tempo, beat, phase, and transport (start/stop) across all Link peers
+- **LinkAudio Send** — capture UE Submix audio and stream it to the Link network as mono/stereo channels
+- **LinkAudio Receive** — subscribe to remote LinkAudio channels and inject audio into UE Submixes
+- **Beat delegates** — `OnBeat` and `OnPhaseZero` events fired on GameThread for gameplay synchronization
+- **Channel discovery** — `GetChannels()` and `OnChannelsChanged` for listing available audio channels
+- **Editor settings** — `UDeveloperSettings` with hot-reload; audio routing configured via Project Settings
+- **Blueprint API** — all Link controls (tempo, quantum, transport, audio routing) exposed as `BlueprintCallable`
 
 ## Requirements
 
@@ -13,8 +23,8 @@ Synchronizes musical beat, tempo, and phase across multiple applications on a lo
 
 | Platform | Status |
 |----------|--------|
+| macOS    | Tested |
 | Windows  | Untested |
-| macOS    | Untested |
 | Linux    | Untested |
 
 ## Setup
@@ -28,6 +38,21 @@ git submodule update --init --recursive
 ```
 
 The `--recursive` flag is required because Ableton Link itself contains a submodule (ASIO standalone).
+
+## Configuration
+
+Open **Project Settings > Plugins > Link4UE**:
+
+| Setting | Description |
+|---------|-------------|
+| Auto Connect | Join the Link network on engine startup |
+| Start/Stop Sync | Synchronize transport state with other peers |
+| Enable Link Audio | Enable LinkAudio channel streaming |
+| Peer Name | Display name advertised to other peers |
+| Default Tempo | Initial BPM for the session |
+| Default Quantum | Phase synchronization unit (1 Bar, 1/4, etc.) |
+| Audio Sends | Submix → LinkAudio channel routing |
+| Audio Receives | LinkAudio channel → Submix routing |
 
 ## Third-Party
 
