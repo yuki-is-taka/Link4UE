@@ -6,6 +6,8 @@
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
 #include "AudioMixerDevice.h"
+#include "Sound/SoundWaveProcedural.h"
+#include "ActiveSound.h"
 #include "ableton/LinkAudio.hpp"
 #include "ableton/util/FloatIntConversion.hpp"
 
@@ -133,25 +135,173 @@ private:
 
 // ---------------------------------------------------------------------------
 // FLink4UEReceiveBridge — receives LinkAudio Source data and routes to Submix
-// TODO(Phase 2): Implement USoundWaveProcedural + FActiveSound pipeline
+//   via USoundWaveProcedural + FActiveSound (no UAudioComponent needed)
 // ---------------------------------------------------------------------------
 
 class FLink4UEReceiveBridge
 {
 public:
-	FLink4UEReceiveBridge() = default;
-	~FLink4UEReceiveBridge() = default;
+	struct FOutput
+	{
+		TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
+	};
+
+	FLink4UEReceiveBridge(ableton::LinkAudio& InLink,
+		const ableton::ChannelId& InChannelId,
+		int32 InDeviceSampleRate,
+		const FString& InChannelName)
+		: DeviceSampleRate(InDeviceSampleRate)
+		, ChannelName(InChannelName)
+		, CreationTime(FPlatformTime::Seconds())
+		, Source(InLink, InChannelId,
+			[this](ableton::LinkAudioSource::BufferHandle BufferHandle)
+			{
+				OnSourceBuffer(BufferHandle);
+			})
+	{
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: ReceiveBridge constructed for '%s' (channelId=%s, deviceRate=%d)"),
+			*ChannelName, *NodeIdToHex(InChannelId), DeviceSampleRate);
+	}
+
+	~FLink4UEReceiveBridge()
+	{
+		// Teardown order (#8):
+		// 1. Source destructor fires first (member destruction order is reverse)
+		//    → SDK callback stops, no more QueueAudio calls
+		// 2. Stop FActiveSounds via StopSoundsUsingResource
+		//    → GeneratePCMData stops being called
+		// 3. TStrongObjectPtr releases USoundWaveProcedural
+		FAudioDevice* AudioDevice = GetMainAudioDevice();
+		for (FOutput& Out : Outputs)
+		{
+			if (AudioDevice && Out.ProceduralSound.IsValid())
+			{
+				AudioDevice->StopSoundsUsingResource(Out.ProceduralSound.Get());
+			}
+			// TStrongObjectPtr::Reset in destructor releases the UObject
+		}
+	}
+
+	void AddOutput(USoundSubmix* TargetSubmix, FAudioDevice* AudioDevice)
+	{
+		FOutput& Out = Outputs.AddDefaulted_GetRef();
+
+		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>();
+		Wave->SetSampleRate(DeviceSampleRate);
+		Wave->NumChannels = 2; // Link Audio is stereo in practice
+		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
+		Wave->SoundGroup = SOUNDGROUP_Default;
+		Wave->bLooping = true;
+		Out.ProceduralSound.Reset(Wave);
+
+		FActiveSound NewActiveSound;
+		NewActiveSound.SetSound(Wave);
+		NewActiveSound.SetWorld(nullptr);
+		NewActiveSound.bAllowSpatialization = false;
+		NewActiveSound.bIsUISound = true;
+		NewActiveSound.bLocationDefined = false;
+
+		if (TargetSubmix)
+		{
+			FSoundSubmixSendInfo SubmixSend;
+			SubmixSend.SoundSubmix = TargetSubmix;
+			SubmixSend.SendLevel = 1.0f;
+			NewActiveSound.SetSubmixSend(SubmixSend);
+		}
+
+		AudioDevice->AddNewActiveSound(NewActiveSound);
+
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: ReceiveBridge '%s' output added → Submix '%s'"),
+			*ChannelName,
+			TargetSubmix ? *TargetSubmix->GetName() : TEXT("(Master)"));
+	}
 
 	const FString& GetChannelName() const { return ChannelName; }
-	uint64 GetCallbackCount() const { return 0; }
+	uint64 GetCallbackCount() const { return CallbackCount.load(std::memory_order_relaxed); }
 	double GetCreationTime() const { return CreationTime; }
-	bool HasReceivedCallback() const { return false; }
+	bool HasReceivedCallback() const { return bLoggedFirstCallback; }
 	uint32 GetOverrunCount() const { return 0; }
 	uint32 GetUnderrunCount() const { return 0; }
 
 private:
+	void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle)
+	{
+		CallbackCount.fetch_add(1, std::memory_order_relaxed);
+
+		const int32 SrcRate = static_cast<int32>(Handle.info.sampleRate);
+		const int32 SrcFrames = static_cast<int32>(Handle.info.numFrames);
+		const int32 SrcChannels = static_cast<int32>(Handle.info.numChannels);
+
+		if (SrcFrames == 0 || SrcChannels == 0)
+		{
+			return;
+		}
+
+		if (!bLoggedFirstCallback)
+		{
+			bLoggedFirstCallback = true;
+			UE_LOG(LogLink4UE, Warning,
+				TEXT("Link4UE Receive: first callback for '%s' (frames=%d, ch=%d, rate=%d)"),
+				*ChannelName, SrcFrames, SrcChannels, SrcRate);
+		}
+
+		const uint8* AudioData;
+		int32 AudioBytes;
+
+		if (SrcRate == DeviceSampleRate)
+		{
+			// No resampling needed — pass int16 data directly
+			AudioData = reinterpret_cast<const uint8*>(Handle.samples);
+			AudioBytes = SrcFrames * SrcChannels * sizeof(int16);
+		}
+		else
+		{
+			// Linear interpolation resampling (#1)
+			const double Ratio = static_cast<double>(SrcRate) / static_cast<double>(DeviceSampleRate);
+			const int32 DstFrames = static_cast<int32>(SrcFrames / Ratio);
+			ResampleBuffer.SetNumUninitialized(DstFrames * SrcChannels, EAllowShrinking::No);
+
+			for (int32 DstFrame = 0; DstFrame < DstFrames; ++DstFrame)
+			{
+				const double SrcPos = DstFrame * Ratio;
+				const int32 Idx0 = static_cast<int32>(SrcPos);
+				const int32 Idx1 = FMath::Min(Idx0 + 1, SrcFrames - 1);
+				const double Frac = SrcPos - Idx0;
+
+				for (int32 Ch = 0; Ch < SrcChannels; ++Ch)
+				{
+					const int16 S0 = Handle.samples[Idx0 * SrcChannels + Ch];
+					const int16 S1 = Handle.samples[Idx1 * SrcChannels + Ch];
+					ResampleBuffer[DstFrame * SrcChannels + Ch] =
+						static_cast<int16>(S0 + static_cast<int16>((S1 - S0) * Frac));
+				}
+			}
+
+			AudioData = reinterpret_cast<const uint8*>(ResampleBuffer.GetData());
+			AudioBytes = DstFrames * SrcChannels * sizeof(int16);
+		}
+
+		// Push to all outputs (#7 — one Bridge, multiple outputs)
+		for (FOutput& Out : Outputs)
+		{
+			if (Out.ProceduralSound.IsValid())
+			{
+				Out.ProceduralSound->QueueAudio(AudioData, AudioBytes);
+			}
+		}
+	}
+
+	TArray<FOutput> Outputs;
+	int32 DeviceSampleRate;
 	FString ChannelName;
-	double CreationTime = 0.0;
+	double CreationTime;
+	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
+
+	TArray<int16> ResampleBuffer;
+	std::atomic<bool> bLoggedFirstCallback{false};
+	std::atomic<uint64> CallbackCount{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -517,6 +667,11 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 
 	bool bAnyValidChannelMissing = false;
 
+	const int32 DeviceSampleRate = AudioDevice->GetSampleRate();
+
+	// Group settings entries by ChannelName → 1 Bridge per channel (#7)
+	TMap<FString, FLink4UEReceiveBridge*> BridgeMap;
+
 	for (const FLink4UEAudioReceive& RecvDef : Settings->AudioReceives)
 	{
 		if (RecvDef.ChannelName.IsEmpty())
@@ -544,14 +699,18 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 			continue;
 		}
 
-		USoundSubmix* Submix = RecvDef.Submix.LoadSynchronous();
-		// Submix can be null — means Master Submix (resolved later in Phase 2)
+		// Reuse existing Bridge for same channel, or create new one
+		FLink4UEReceiveBridge*& Bridge = BridgeMap.FindOrAdd(RecvDef.ChannelName);
+		if (!Bridge)
+		{
+			LinkInstance->ActiveReceives.Add(MakeUnique<FLink4UEReceiveBridge>(
+				LinkInstance->Link, *FoundId, DeviceSampleRate, RecvDef.ChannelName));
+			Bridge = LinkInstance->ActiveReceives.Last().Get();
+		}
 
-		// TODO(Phase 2): Replace with new USoundWaveProcedural-based ReceiveBridge
-		UE_LOG(LogLink4UE, Warning,
-			TEXT("Link4UE: AudioReceive '%s' → Submix '%s' — pipeline not yet implemented (Phase 2)"),
-			*RecvDef.ChannelName,
-			Submix ? *Submix->GetName() : TEXT("(Master)"));
+		USoundSubmix* Submix = RecvDef.Submix.LoadSynchronous();
+		// null Submix = Master Submix (FActiveSound default routing)
+		Bridge->AddOutput(Submix, AudioDevice);
 	}
 
 	bReceiveRoutesPending = bAnyValidChannelMissing;
