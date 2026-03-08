@@ -5,7 +5,6 @@
 #include "AudioDevice.h"
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
-#include "AudioMixerDevice.h"
 #include "Sound/SoundWaveProcedural.h"
 #include "ActiveSound.h"
 #include "ableton/LinkAudio.hpp"
@@ -320,7 +319,7 @@ struct ULink4UESubsystem::FLinkInstance
 	};
 	TArray<FActiveSend> ActiveSends;
 
-	// Active receive bridges (LinkAudio Source → AudioBus)
+	// Active receive bridges (LinkAudio Source → Submix via USoundWaveProcedural)
 	TArray<TUniquePtr<FLink4UEReceiveBridge>> ActiveReceives;
 
 	// Auto master send — always captures master submix output when Link Audio is enabled.
@@ -402,7 +401,7 @@ struct ULink4UESubsystem::FLinkInstance
 
 	void TearDownReceives()
 	{
-		// Source destructors unsubscribe callbacks; PatchInput destructors disconnect patches
+		// Bridge destructors: Source unsubscribes → StopSoundsUsingResource → TStrongObjectPtr releases
 		ActiveReceives.Empty();
 	}
 };
