@@ -56,15 +56,9 @@ struct LINK4UE_API FLink4UEAudioReceive
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	FString ChannelName;
 
-	/** Target Submix to inject received audio into. */
+	/** Target Submix for audio output. Empty = Master Submix. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	TSoftObjectPtr<USoundSubmix> Submix;
-
-	/** Target channel index within the Submix (0-based).
-	 *  -1 = replicate to all channels. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE", meta = (
-		ClampMin = "-1"))
-	int32 SubmixChannelIndex = -1;
 };
 
 DECLARE_MULTICAST_DELEGATE(FLink4UEOnSettingsChanged);
@@ -132,7 +126,7 @@ public:
 		DisplayName = "Audio Sends"))
 	TArray<FLink4UEAudioSend> AudioSends;
 
-	/** Link Audio channels to receive and inject into Submixes. */
+	/** Link Audio channels to receive and route to Submixes. */
 	UPROPERTY(Config, EditAnywhere, Category = "Audio Routing", meta = (
 		DisplayName = "Audio Receives"))
 	TArray<FLink4UEAudioReceive> AudioReceives;

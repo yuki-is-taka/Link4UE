@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Subsystems/EngineSubsystem.h"
+#include "AudioDeviceHandle.h"
 #include "Link4UESettings.h"
 #include "Link4UESubsystem.generated.h"
 
@@ -174,8 +175,11 @@ private:
 	/** Apply all settings to the Link instance. */
 	void ApplySettings(const ULink4UESettings* Settings);
 
-	/** Rebuild send/receive audio routes from settings. */
-	void RebuildAudioRoutes(const ULink4UESettings* Settings);
+	/** Rebuild Submix→LinkAudio send routes (depends on AudioDevice). */
+	void RebuildAudioSends(const ULink4UESettings* Settings);
+
+	/** Rebuild LinkAudio→AudioBus receive routes (depends on AudioBusSubsystem + channels). */
+	void RebuildAudioReceives(const ULink4UESettings* Settings);
 
 #if WITH_EDITOR
 	void OnSettingsChanged();
@@ -213,4 +217,17 @@ private:
 
 	/** Ticker delegate handle. */
 	FTSTicker::FDelegateHandle TickHandle;
+
+	/** AudioDevice creation callback — rebuilds routes when device becomes available. */
+	void OnAudioDeviceCreated(Audio::FDeviceId DeviceId);
+	FDelegateHandle AudioDeviceCreatedHandle;
+
+	/** True while send routes have not been successfully built yet. */
+	bool bSendRoutesPending = false;
+
+	/** True while receive routes have not been successfully built yet. */
+	bool bReceiveRoutesPending = false;
+
+	/** True while we are inside RebuildAudio* — suppresses re-entrant channel dirty flags. */
+	bool bIsRebuilding = false;
 };

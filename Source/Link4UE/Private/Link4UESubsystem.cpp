@@ -6,13 +6,13 @@
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
 #include "AudioMixerDevice.h"
-#include "AudioMixerSubmix.h"
 #include "ableton/LinkAudio.hpp"
 #include "ableton/util/FloatIntConversion.hpp"
-#include "DSP/MultithreadedPatching.h"
 
 namespace
 {
+	constexpr size_t kDefaultMaxSamples = 8192;
+
 	FString NodeIdToHex(const ableton::link::NodeId& Id)
 	{
 		FString Out;
@@ -132,92 +132,26 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// FLink4UEReceiveBridge — receives LinkAudio Source data and pushes to Submix
+// FLink4UEReceiveBridge — receives LinkAudio Source data and routes to Submix
+// TODO(Phase 2): Implement USoundWaveProcedural + FActiveSound pipeline
 // ---------------------------------------------------------------------------
 
 class FLink4UEReceiveBridge
 {
 public:
-	FLink4UEReceiveBridge(ableton::LinkAudio& InLink, const ableton::ChannelId& InChannelId,
-		Audio::FPatchInput&& InPatchInput, int32 InSubmixChannelIndex, int32 InSubmixNumChannels)
-		: PatchInput(MoveTemp(InPatchInput))
-		, SubmixChannelIndex(InSubmixChannelIndex)
-		, SubmixNumChannels(InSubmixNumChannels)
-		, Source(InLink, InChannelId,
-			[this](ableton::LinkAudioSource::BufferHandle BufferHandle)
-			{
-				OnSourceBuffer(BufferHandle);
-			})
-	{
-	}
+	FLink4UEReceiveBridge() = default;
+	~FLink4UEReceiveBridge() = default;
 
-	~FLink4UEReceiveBridge()
-	{
-		// Source destructor unsubscribes the callback
-	}
-
-	uint32 GetUnderrunCount() const { return UnderrunCount.load(std::memory_order_relaxed); }
-	uint32 GetOverrunCount() const { return OverrunCount.load(std::memory_order_relaxed); }
+	const FString& GetChannelName() const { return ChannelName; }
+	uint64 GetCallbackCount() const { return 0; }
+	double GetCreationTime() const { return CreationTime; }
+	bool HasReceivedCallback() const { return false; }
+	uint32 GetOverrunCount() const { return 0; }
+	uint32 GetUnderrunCount() const { return 0; }
 
 private:
-	void OnSourceBuffer(const ableton::LinkAudioSource::BufferHandle BufferHandle)
-	{
-		const size_t NumFrames = BufferHandle.info.numFrames;
-		const size_t SrcChannels = BufferHandle.info.numChannels;
-
-		if (NumFrames == 0)
-		{
-			return;
-		}
-
-		// Convert int16 → float and map to target submix channels
-		const int32 OutSamples = static_cast<int32>(NumFrames) * SubmixNumChannels;
-
-		// Resize conversion buffer if needed (only grows)
-		if (OutSamples > ConversionBuffer.Num())
-		{
-			ConversionBuffer.SetNumZeroed(OutSamples);
-		}
-		else
-		{
-			FMemory::Memzero(ConversionBuffer.GetData(), OutSamples * sizeof(float));
-		}
-
-		for (int32 Frame = 0; Frame < static_cast<int32>(NumFrames); ++Frame)
-		{
-			if (SubmixChannelIndex < 0)
-			{
-				// Replicate to all channels
-				const float Sample = ableton::util::int16ToFloat<float>(
-					BufferHandle.samples[Frame * SrcChannels]);
-				for (int32 Ch = 0; Ch < SubmixNumChannels; ++Ch)
-				{
-					ConversionBuffer[Frame * SubmixNumChannels + Ch] = Sample;
-				}
-			}
-			else if (SubmixChannelIndex < SubmixNumChannels)
-			{
-				// Place at specific channel index
-				const float Sample = ableton::util::int16ToFloat<float>(
-					BufferHandle.samples[Frame * SrcChannels]);
-				ConversionBuffer[Frame * SubmixNumChannels + SubmixChannelIndex] = Sample;
-			}
-		}
-
-		const int32 Pushed = PatchInput.PushAudio(ConversionBuffer.GetData(), OutSamples);
-		if (Pushed < OutSamples)
-		{
-			OverrunCount.fetch_add(1, std::memory_order_relaxed);
-		}
-	}
-
-	Audio::FPatchInput PatchInput;
-	int32 SubmixChannelIndex;
-	int32 SubmixNumChannels;
-	ableton::LinkAudioSource Source;
-	TArray<float> ConversionBuffer;
-	std::atomic<uint32> UnderrunCount{0};
-	std::atomic<uint32> OverrunCount{0};
+	FString ChannelName;
+	double CreationTime = 0.0;
 };
 
 // ---------------------------------------------------------------------------
@@ -236,17 +170,75 @@ struct ULink4UESubsystem::FLinkInstance
 	};
 	TArray<FActiveSend> ActiveSends;
 
-	// Active receive bridges (LinkAudio Source → Submix)
+	// Active receive bridges (LinkAudio Source → AudioBus)
 	TArray<TUniquePtr<FLink4UEReceiveBridge>> ActiveReceives;
+
+	// Auto master send — always captures master submix output when Link Audio is enabled.
+	// The SDK requires at least one Sink for peers to establish the audio return path.
+	FActiveSend MasterSend;
+
+	float HealthCheckTimer = 0.f;
 
 	FLinkInstance(double BPM, const std::string& PeerName)
 		: Link(BPM, PeerName)
 	{
 	}
 
+	void HealthCheckTick(float DeltaTime)
+	{
+		HealthCheckTimer += DeltaTime;
+		if (HealthCheckTimer < 5.0f)
+		{
+			return;
+		}
+		HealthCheckTimer = 0.f;
+
+		const double Now = FPlatformTime::Seconds();
+		const bool bLinkEnabled = Link.isEnabled();
+		const bool bAudioEnabled = Link.isLinkAudioEnabled();
+		const auto AllChannels = Link.channels();
+		const int32 NumPeers = static_cast<int32>(Link.numPeers());
+
+		const bool bHasMasterSend = MasterSend.Bridge.IsValid();
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE Health: peers=%d, link=%s, audio=%s, channels=%d, masterSend=%s, sends=%d, receives=%d"),
+			NumPeers,
+			bLinkEnabled ? TEXT("ON") : TEXT("OFF"),
+			bAudioEnabled ? TEXT("ON") : TEXT("OFF"),
+			static_cast<int32>(AllChannels.size()),
+			bHasMasterSend ? TEXT("YES") : TEXT("NO"),
+			ActiveSends.Num(),
+			ActiveReceives.Num());
+
+		for (int32 i = 0; i < ActiveReceives.Num(); ++i)
+		{
+			const auto& Recv = ActiveReceives[i];
+			const double Age = Now - Recv->GetCreationTime();
+			UE_LOG(LogLink4UE, Log,
+				TEXT("  Receive[%d] '%s': callbacks=%llu, age=%.1fs, hasReceived=%s, overruns=%u, underruns=%u"),
+				i, *Recv->GetChannelName(),
+				Recv->GetCallbackCount(),
+				Age,
+				Recv->HasReceivedCallback() ? TEXT("YES") : TEXT("NO"),
+				Recv->GetOverrunCount(),
+				Recv->GetUnderrunCount());
+		}
+	}
+
 	void TearDownSends()
 	{
 		FAudioDevice* AudioDevice = GetMainAudioDevice();
+
+		// Tear down master send
+		if (AudioDevice && MasterSend.Bridge.IsValid() && MasterSend.Submix.IsValid())
+		{
+			AudioDevice->UnregisterSubmixBufferListener(
+				MasterSend.Bridge.ToSharedRef(), *MasterSend.Submix.Get());
+		}
+		MasterSend.Bridge.Reset();
+		MasterSend.Submix.Reset();
+
+		// Tear down user-configured sends
 		for (auto& Send : ActiveSends)
 		{
 			if (AudioDevice && Send.Bridge.IsValid() && Send.Submix.IsValid())
@@ -327,6 +319,10 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Apply settings
 	ApplySettings(Settings);
 
+	// Listen for AudioDevice creation so we can rebuild routes once the device is ready
+	AudioDeviceCreatedHandle = FAudioDeviceManagerDelegates::OnAudioDeviceCreated.AddUObject(
+		this, &ULink4UESubsystem::OnAudioDeviceCreated);
+
 #if WITH_EDITOR
 	SettingsChangedHandle = ULink4UESettings::OnSettingsChanged.AddUObject(
 		this, &ULink4UESubsystem::OnSettingsChanged);
@@ -335,6 +331,8 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void ULink4UESubsystem::Deinitialize()
 {
+	FAudioDeviceManagerDelegates::OnAudioDeviceCreated.Remove(AudioDeviceCreatedHandle);
+
 #if WITH_EDITOR
 	ULink4UESettings::OnSettingsChanged.Remove(SettingsChangedHandle);
 #endif
@@ -352,6 +350,22 @@ void ULink4UESubsystem::Deinitialize()
 
 	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem deinitialized"));
 	Super::Deinitialize();
+}
+
+// ---------------------------------------------------------------------------
+// AudioDevice creation callback
+// ---------------------------------------------------------------------------
+
+void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
+{
+	// Only rebuild if sends are actually pending — this callback can fire multiple times
+	if (!bSendRoutesPending)
+	{
+		return;
+	}
+	UE_LOG(LogLink4UE, Log,
+		TEXT("Link4UE: OnAudioDeviceCreated (id=%u) — rebuilding deferred send routes"), DeviceId);
+	RebuildAudioSends(GetDefault<ULink4UESettings>());
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +389,12 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 
 	SetTempo(Settings->DefaultTempo);
 
-	RebuildAudioRoutes(Settings);
+	bIsRebuilding = true;
+	RebuildAudioSends(Settings);
+	RebuildAudioReceives(Settings);
+	bIsRebuilding = false;
+	// Drain any channel-dirty flags caused by our own Sink/Source creation/destruction
+	bChannelsDirty.store(false, std::memory_order_relaxed);
 
 	UE_LOG(LogLink4UE, Log, TEXT("Link4UE settings applied (tempo=%.1f, auto=%s, audio=%s, peer=%s)"),
 		Settings->DefaultTempo,
@@ -384,142 +403,158 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 		*Settings->PeerName);
 }
 
-void ULink4UESubsystem::RebuildAudioRoutes(const ULink4UESettings* Settings)
+void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 {
 	if (!LinkInstance || !Settings)
 	{
 		return;
 	}
 
-	// --- Rebuild send routes ---
 	LinkInstance->TearDownSends();
 
-	if (Settings->bEnableLinkAudio)
+	if (!Settings->bEnableLinkAudio)
 	{
-		FAudioDevice* AudioDevice = GetMainAudioDevice();
-		if (AudioDevice)
-		{
-			for (const FLink4UEAudioSend& SendDef : Settings->AudioSends)
-			{
-				USoundSubmix* Submix = SendDef.Submix.LoadSynchronous();
-				if (!Submix)
-				{
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE: AudioSend skipped — Submix asset not found"));
-					continue;
-				}
-
-				// Determine channel name: explicit prefix or Submix asset name
-				FString ChannelName = SendDef.ChannelNamePrefix.IsEmpty()
-					? Submix->GetName()
-					: SendDef.ChannelNamePrefix;
-
-				constexpr size_t kDefaultMaxSamples = 8192;
-				TSharedRef<FLink4UESendBridge, ESPMode::ThreadSafe> Bridge =
-					MakeShared<FLink4UESendBridge, ESPMode::ThreadSafe>(
-						LinkInstance->Link, ChannelName, kDefaultMaxSamples, Quantum);
-
-				AudioDevice->RegisterSubmixBufferListener(Bridge, *Submix);
-
-				FLinkInstance::FActiveSend& ActiveSend = LinkInstance->ActiveSends.AddDefaulted_GetRef();
-				ActiveSend.Bridge = Bridge;
-				ActiveSend.Submix = Submix;
-
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route created [%s] → Sink '%s'"),
-					*Submix->GetName(), *ChannelName);
-			}
-		}
-		else
-		{
-			UE_LOG(LogLink4UE, Warning,
-				TEXT("Link4UE: AudioDevice not available — send routes deferred"));
-		}
+		bSendRoutesPending = false;
+		return;
 	}
 
-	// --- Rebuild receive routes ---
+	FAudioDevice* AudioDevice = GetMainAudioDevice();
+	if (!AudioDevice)
+	{
+		bSendRoutesPending = true;
+		UE_LOG(LogLink4UE, Warning,
+			TEXT("Link4UE: AudioDevice not available — send routes deferred"));
+		return;
+	}
+
+	// Always create a Sink for the master submix output.
+	// This is required by the SDK for peers to establish audio return paths,
+	// and makes UE's master output available as a channel on the Link Audio network.
+	{
+		USoundSubmix& MasterSubmix = AudioDevice->GetMainSubmixObject();
+		FString MasterChannelName = Settings->PeerName;
+
+		TSharedRef<FLink4UESendBridge, ESPMode::ThreadSafe> Bridge =
+			MakeShared<FLink4UESendBridge, ESPMode::ThreadSafe>(
+				LinkInstance->Link, MasterChannelName, kDefaultMaxSamples, Quantum);
+
+		AudioDevice->RegisterSubmixBufferListener(Bridge, MasterSubmix);
+
+		LinkInstance->MasterSend.Bridge = Bridge;
+		LinkInstance->MasterSend.Submix = &MasterSubmix;
+
+		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Master send created [%s] → Sink '%s'"),
+			*MasterSubmix.GetName(), *MasterChannelName);
+	}
+
+	// User-configured additional sends
+	for (const FLink4UEAudioSend& SendDef : Settings->AudioSends)
+	{
+		USoundSubmix* Submix = SendDef.Submix.LoadSynchronous();
+		if (!Submix)
+		{
+			UE_LOG(LogLink4UE, Warning,
+				TEXT("Link4UE: AudioSend skipped — Submix asset not found"));
+			continue;
+		}
+
+		FString ChannelName = SendDef.ChannelNamePrefix.IsEmpty()
+			? Submix->GetName()
+			: SendDef.ChannelNamePrefix;
+
+		TSharedRef<FLink4UESendBridge, ESPMode::ThreadSafe> Bridge =
+			MakeShared<FLink4UESendBridge, ESPMode::ThreadSafe>(
+				LinkInstance->Link, ChannelName, kDefaultMaxSamples, Quantum);
+
+		AudioDevice->RegisterSubmixBufferListener(Bridge, *Submix);
+
+		FLinkInstance::FActiveSend& ActiveSend = LinkInstance->ActiveSends.AddDefaulted_GetRef();
+		ActiveSend.Bridge = Bridge;
+		ActiveSend.Submix = Submix;
+
+		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route created [%s] → Sink '%s'"),
+			*Submix->GetName(), *ChannelName);
+	}
+
+	bSendRoutesPending = false;
+}
+
+void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
+{
+	if (!LinkInstance || !Settings)
+	{
+		return;
+	}
+
 	LinkInstance->TearDownReceives();
 
-	if (Settings->bEnableLinkAudio)
+	if (!Settings->bEnableLinkAudio)
 	{
-		Audio::FMixerDevice* MixerDevice = nullptr;
-		{
-			FAudioDevice* AudioDevice = GetMainAudioDevice();
-			// UE5 always uses FMixerDevice — safe to static_cast
-			if (AudioDevice)
-			{
-				MixerDevice = static_cast<Audio::FMixerDevice*>(AudioDevice);
-			}
-		}
-
-		if (MixerDevice)
-		{
-			// Resolve channel names to ChannelIds from current session
-			const auto AllChannels = LinkInstance->Link.channels();
-
-			for (const FLink4UEAudioReceive& RecvDef : Settings->AudioReceives)
-			{
-				USoundSubmix* Submix = RecvDef.Submix.LoadSynchronous();
-				if (!Submix)
-				{
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE: AudioReceive skipped — Submix asset not found"));
-					continue;
-				}
-
-				// Find matching channel by name
-				const ableton::ChannelId* FoundId = nullptr;
-				for (const auto& Ch : AllChannels)
-				{
-					if (FString(UTF8_TO_TCHAR(Ch.name.c_str())) == RecvDef.ChannelName)
-					{
-						FoundId = &Ch.id;
-						break;
-					}
-				}
-
-				if (!FoundId)
-				{
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE: AudioReceive skipped — channel '%s' not found in session"),
-						*RecvDef.ChannelName);
-					continue;
-				}
-
-				// Get the mixer submix to add a patch
-				Audio::FMixerSubmixWeakPtr SubmixWeakPtr = MixerDevice->GetSubmixInstance(Submix);
-				Audio::FMixerSubmixPtr SubmixPtr = SubmixWeakPtr.Pin();
-				if (!SubmixPtr.IsValid())
-				{
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE: AudioReceive skipped — mixer submix not found for '%s'"),
-						*Submix->GetName());
-					continue;
-				}
-
-				// Determine submix channel count (default to device output channels)
-				const int32 SubmixNumChannels = FMath::Max(
-					MixerDevice->GetNumDeviceChannels(), 2);
-
-				// AddPatch creates the PatchOutput inside the submix and returns it
-				Audio::FPatchOutputStrongPtr PatchOutput = SubmixPtr->AddPatch(1.0f);
-				Audio::FPatchInput PatchInput(PatchOutput);
-
-				// Create the receive bridge
-				LinkInstance->ActiveReceives.Add(MakeUnique<FLink4UEReceiveBridge>(
-					LinkInstance->Link, *FoundId,
-					MoveTemp(PatchInput), RecvDef.SubmixChannelIndex, SubmixNumChannels));
-
-				UE_LOG(LogLink4UE, Log,
-					TEXT("Link4UE: Receive route created '%s' → Submix '%s' (ch=%d)"),
-					*RecvDef.ChannelName, *Submix->GetName(), RecvDef.SubmixChannelIndex);
-			}
-		}
-		else
-		{
-			UE_LOG(LogLink4UE, Warning,
-				TEXT("Link4UE: MixerDevice not available — receive routes deferred"));
-		}
+		bReceiveRoutesPending = false;
+		return;
 	}
+
+	FAudioDevice* AudioDevice = GetMainAudioDevice();
+	if (!AudioDevice)
+	{
+		bReceiveRoutesPending = true;
+		UE_LOG(LogLink4UE, Warning,
+			TEXT("Link4UE: AudioDevice not available — receive routes deferred"));
+		return;
+	}
+
+	const auto AllChannels = LinkInstance->Link.channels();
+
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE: %d channel(s) visible in session:"),
+		static_cast<int32>(AllChannels.size()));
+	for (const auto& Ch : AllChannels)
+	{
+		UE_LOG(LogLink4UE, Log, TEXT("  - '%s' (peer='%s', id=%s)"),
+			UTF8_TO_TCHAR(Ch.name.c_str()),
+			UTF8_TO_TCHAR(Ch.peerName.c_str()),
+			*NodeIdToHex(Ch.id));
+	}
+
+	bool bAnyValidChannelMissing = false;
+
+	for (const FLink4UEAudioReceive& RecvDef : Settings->AudioReceives)
+	{
+		if (RecvDef.ChannelName.IsEmpty())
+		{
+			continue;
+		}
+
+		// Find matching channel by name
+		const ableton::ChannelId* FoundId = nullptr;
+		for (const auto& Ch : AllChannels)
+		{
+			if (FString(UTF8_TO_TCHAR(Ch.name.c_str())) == RecvDef.ChannelName)
+			{
+				FoundId = &Ch.id;
+				break;
+			}
+		}
+
+		if (!FoundId)
+		{
+			bAnyValidChannelMissing = true;
+			UE_LOG(LogLink4UE, Warning,
+				TEXT("Link4UE: AudioReceive skipped — channel '%s' not found in session"),
+				*RecvDef.ChannelName);
+			continue;
+		}
+
+		USoundSubmix* Submix = RecvDef.Submix.LoadSynchronous();
+		// Submix can be null — means Master Submix (resolved later in Phase 2)
+
+		// TODO(Phase 2): Replace with new USoundWaveProcedural-based ReceiveBridge
+		UE_LOG(LogLink4UE, Warning,
+			TEXT("Link4UE: AudioReceive '%s' → Submix '%s' — pipeline not yet implemented (Phase 2)"),
+			*RecvDef.ChannelName,
+			Submix ? *Submix->GetName() : TEXT("(Master)"));
+	}
+
+	bReceiveRoutesPending = bAnyValidChannelMissing;
 }
 
 #if WITH_EDITOR
@@ -581,10 +616,48 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	{
 		OnStartStopChanged.Broadcast(PendingIsPlaying.load(std::memory_order_relaxed));
 	}
+	bool bRebuiltReceivesThisTick = false;
 	if (bChannelsDirty.exchange(false, std::memory_order_acquire))
 	{
+		if (!bIsRebuilding)
+		{
+			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Channels changed — rebuilding receive routes"));
+			bIsRebuilding = true;
+			RebuildAudioReceives(GetDefault<ULink4UESettings>());
+			bIsRebuilding = false;
+			// Drain self-triggered dirty flags
+			bChannelsDirty.store(false, std::memory_order_relaxed);
+			bRebuiltReceivesThisTick = true;
+		}
 		OnChannelsChanged.Broadcast();
 	}
+
+	// Retry deferred audio routes once AudioDevice becomes available
+	if (bSendRoutesPending || (bReceiveRoutesPending && !bRebuiltReceivesThisTick))
+	{
+		FAudioDevice* AudioDevice = GetMainAudioDevice();
+		if (AudioDevice)
+		{
+			const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
+			bIsRebuilding = true;
+			if (bSendRoutesPending)
+			{
+				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: AudioDevice now available — retrying deferred send routes"));
+				RebuildAudioSends(Settings);
+			}
+			if (bReceiveRoutesPending)
+			{
+				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: AudioDevice now available — retrying deferred receive routes"));
+				RebuildAudioReceives(Settings);
+			}
+			bIsRebuilding = false;
+			// Drain self-triggered dirty flags
+			bChannelsDirty.store(false, std::memory_order_relaxed);
+		}
+	}
+
+	// Periodic health check for receive diagnostics
+	LinkInstance->HealthCheckTick(DeltaTime);
 
 	return true; // keep ticking
 }
