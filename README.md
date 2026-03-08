@@ -54,6 +54,10 @@ Open **Project Settings > Plugins > Link4UE**:
 | Audio Sends | Submix → LinkAudio channel routing |
 | Audio Receives | LinkAudio channel → Submix routing |
 
+### Master Send (automatic)
+
+When **Enable Link Audio** is on, Link4UE automatically creates a Send for the Master Submix using the configured **Peer Name** as the channel name. This is required by the Link Audio protocol — without at least one Sink (Send), remote peers cannot discover this node's audio channels and will not send audio. The Master Send runs independently of any user-configured entries in Audio Sends.
+
 ## Third-Party
 
 - [Ableton Link 4.0.0-beta.2](https://github.com/Ableton/link) (GPLv2+ / proprietary dual license)
