@@ -121,7 +121,19 @@ public:
 
 	virtual const FString& GetListenerName() const override
 	{
+		// ListenerName is set at construction and intentionally NOT updated on rename.
+		// UnregisterSubmixBufferListener matches by pointer, not name.
 		return ListenerName;
+	}
+
+	/** Rename the underlying LinkAudio Sink channel.
+	 *  Must be called from GameThread only.
+	 *  SDK marks setName() as "Thread-safe: no" but the internal implementation uses
+	 *  util::Locked<> + atomic_flag, so GameThread → Link thread access is safe in practice.
+	 *  Audio thread only touches retainBuffer()/commit() which are separate data paths. */
+	void SetChannelName(const FString& NewName)
+	{
+		Sink.setName(TCHAR_TO_UTF8(*NewName));
 	}
 
 private:
@@ -711,7 +723,7 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 			*MasterSubmix.GetName(), *MasterChannelName);
 	}
 
-	// --- Diff user sends ---
+	// --- Diff user sends (2-pass matching) ---
 
 	// Build desired list from settings
 	struct FDesiredSend { USoundSubmix* Submix; FString ChannelName; };
@@ -735,7 +747,7 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		Send.bMatched = false;
 	}
 
-	// Match desired → active (first unmatched match wins, preserves duplicates)
+	// Pass 1: Exact match (Submix + ChannelName) — stable bridges stay untouched
 	TArray<int32> UnmatchedDesired;
 	for (int32 Di = 0; Di < Desired.Num(); ++Di)
 	{
@@ -757,6 +769,32 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		}
 	}
 
+	// Pass 2: Submix-only match for remaining — rename in-place via Sink.setName()
+	TArray<int32> StillUnmatched;
+	for (int32 Di : UnmatchedDesired)
+	{
+		bool bFound = false;
+		for (auto& Send : LinkInstance->ActiveSends)
+		{
+			if (!Send.bMatched && Send.Submix.Get() == Desired[Di].Submix)
+			{
+				Send.bMatched = true;
+				bFound = true;
+
+				// In-place rename — preserves Sink identity (ChannelId) so peers stay connected
+				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route renamed [%s] '%s' → '%s'"),
+					*Desired[Di].Submix->GetName(), *Send.ChannelName, *Desired[Di].ChannelName);
+				Send.Bridge->SetChannelName(Desired[Di].ChannelName);
+				Send.ChannelName = Desired[Di].ChannelName;
+				break;
+			}
+		}
+		if (!bFound)
+		{
+			StillUnmatched.Add(Di);
+		}
+	}
+
 	// Remove unmatched active sends (reverse iteration for stable indices)
 	for (int32 i = LinkInstance->ActiveSends.Num() - 1; i >= 0; --i)
 	{
@@ -775,8 +813,8 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		}
 	}
 
-	// Add unmatched desired sends
-	for (int32 Di : UnmatchedDesired)
+	// Add still-unmatched desired sends (new Submix entries)
+	for (int32 Di : StillUnmatched)
 	{
 		const FDesiredSend& D = Desired[Di];
 
