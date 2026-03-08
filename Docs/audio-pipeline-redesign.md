@@ -1,6 +1,6 @@
 # Audio Pipeline Redesign — SoundWaveProcedural 方式
 
-> Status: **Ready** — 設計完了、実装待ち
+> Status: **Implemented** — Phase 1〜3 完了、結合テスト待ち
 > Date: 2026-03-08
 > Related: [Link Audio SDK 4.0.0-beta2](https://github.com/Ableton/link)
 
@@ -129,34 +129,31 @@ Source にだけバッファを渡す。同一 ChannelId に複数の Source を
 class FLink4UEReceiveBridge
 {
 public:
-    // 出力先 (1 Bridge に複数持てる)
     struct FOutput
     {
         TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
-        uint64 AudioComponentID = 0;  // FActiveSound 停止用ハンドル (#9)
     };
 
     FLink4UEReceiveBridge(ableton::LinkAudio& InLink,
                           const ableton::ChannelId& InChannelId,
-                          int32 InNumChannels,
-                          int32 InSampleRate,
-                          FAudioDevice* InAudioDevice);
+                          int32 InDeviceSampleRate,
+                          const FString& InChannelName);
     ~FLink4UEReceiveBridge();
 
-    /** 出力先を追加。同じチャンネルを複数 Submix に送る場合に使用。 */
     void AddOutput(USoundSubmix* TargetSubmix, FAudioDevice* AudioDevice);
 
 private:
     void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle);
 
-    ableton::LinkAudioSource Source;
     TArray<FOutput> Outputs;
-
     int32 DeviceSampleRate;
-    int32 NumChannels;
-    TArray<int16> ResampleBuffer;  // リサンプリング用ワークバッファ
-
     FString ChannelName;
+    double CreationTime;
+    ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
+
+    TArray<int16> ResampleBuffer;
+    std::atomic<bool> bLoggedFirstCallback{false};
+    std::atomic<uint64> CallbackCount{0};
 };
 ```
 
@@ -170,33 +167,28 @@ void FLink4UEReceiveBridge::AddOutput(USoundSubmix* TargetSubmix,
 
     USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>();
     Wave->SetSampleRate(DeviceSampleRate);
-    Wave->NumChannels = NumChannels;
+    Wave->NumChannels = 2; // Link Audio is stereo in practice
     Wave->Duration = INDEFINITELY_LOOPING_DURATION;
     Wave->SoundGroup = SOUNDGROUP_Default;
     Wave->bLooping = true;
     Out.ProceduralSound.Reset(Wave);
 
-    TSharedRef<FActiveSound> NewActiveSound = MakeShared<FActiveSound>();
-    NewActiveSound->SetSound(Wave);
-    NewActiveSound->SetWorld(nullptr);
-    NewActiveSound->bAllowSpatialization = false;
-    NewActiveSound->bIsUISound = true;
-    NewActiveSound->bLocationDefined = false;
-
-    // 一意な AudioComponentID を設定（停止用ハンドル、懸念点 #9 参照）
-    static uint64 NextBridgeSoundID = 0xFF00000000000000ULL;
-    Out.AudioComponentID = ++NextBridgeSoundID;
-    NewActiveSound->AudioComponentID = Out.AudioComponentID;
+    FActiveSound NewActiveSound;
+    NewActiveSound.SetSound(Wave);
+    NewActiveSound.SetWorld(nullptr);
+    NewActiveSound.bAllowSpatialization = false;
+    NewActiveSound.bIsUISound = true;
+    NewActiveSound.bLocationDefined = false;
 
     if (TargetSubmix)
     {
         FSoundSubmixSendInfo SubmixSend;
         SubmixSend.SoundSubmix = TargetSubmix;
         SubmixSend.SendLevel = 1.0f;
-        NewActiveSound->SetSubmixSend(SubmixSend);
+        NewActiveSound.SetSubmixSend(SubmixSend);
     }
 
-    AudioDevice->AddNewActiveSound(MoveTemp(NewActiveSound));
+    AudioDevice->AddNewActiveSound(NewActiveSound);
 }
 ```
 
@@ -408,53 +400,29 @@ Project Settings で Audio Receives を編集すると `OnSettingsChanged` → `
 
 ### 9. FActiveSound の停止方法 [解決済み]
 
-**調査結果**: UAudioComponent なしでも `AudioComponentID` を手動設定すれば停止可能。
+**調査結果**: `AudioComponentID` は private メンバで setter が存在しない。
+代わりに `FAudioDevice::StopSoundsUsingResource(USoundWave*)` を使用する。
 
-UE 5.7 の `AddNewActiveSound` は `TSharedRef<FActiveSound>` を受け取る新 API がある
-（const ref 版は deprecated）。戻り値は void だが、事前に ID を設定しておけばよい。
+`USoundWaveProcedural` は `USoundWave` のサブクラスなので、Bridge が保持する
+ProceduralSound ポインタをそのまま渡せば該当する FActiveSound が停止される。
 
-**停止 API**:
-- `FAudioDevice::StopActiveSound(uint64 AudioComponentID)` — Game/Audio どちらのスレッドからでも呼べる（内部で自動ディスパッチ）
-- `AudioComponentIDToActiveSoundMap` は `AudioComponentID > 0` の場合にエントリが作られる
-- UAudioComponent 由来でなくても任意の uint64 を設定可能
-
-**決定: AudioComponentID 方式**
+**決定: StopSoundsUsingResource 方式**
 
 ```cpp
-struct FOutput
+// 破棄時（デストラクタ内）
+FAudioDevice* AudioDevice = GetMainAudioDevice();
+for (FOutput& Out : Outputs)
 {
-    TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
-    uint64 AudioComponentID = 0;  // 停止用ハンドル
-};
-
-void AddOutput(USoundSubmix* TargetSubmix, FAudioDevice* AudioDevice)
-{
-    // ... ProceduralSound 作成 ...
-
-    TSharedRef<FActiveSound> NewActiveSound = MakeShared<FActiveSound>();
-    NewActiveSound->SetSound(Wave);
-    NewActiveSound->SetWorld(nullptr);
-    NewActiveSound->bAllowSpatialization = false;
-    NewActiveSound->bIsUISound = true;
-
-    // 一意な ID を生成して設定
-    static uint64 NextBridgeSoundID = 0xFF00000000000000ULL;
-    uint64 ID = ++NextBridgeSoundID;
-    NewActiveSound->AudioComponentID = ID;
-    Out.AudioComponentID = ID;
-
-    AudioDevice->AddNewActiveSound(MoveTemp(NewActiveSound));
-}
-
-// 破棄時
-void RemoveOutput(FOutput& Out, FAudioDevice* AudioDevice)
-{
-    AudioDevice->StopActiveSound(Out.AudioComponentID);  // スレッドセーフ
-    Out.ProceduralSound.Reset();
+    if (AudioDevice && Out.ProceduralSound.IsValid())
+    {
+        AudioDevice->StopSoundsUsingResource(Out.ProceduralSound.Get());
+    }
+    // TStrongObjectPtr のデストラクタで USoundWaveProcedural を解放
 }
 ```
 
-**注意**: AddOutput のコード例も `TSharedRef` + `MoveTemp` に更新が必要（上記メインボディの AddOutput セクション）。
+**利点**: AudioComponentID の管理が不要。ProceduralSound は Bridge ごとにユニークなので
+誤って他の音を停止するリスクもない。
 
 ### 10. QueueAudio のデータフォーマット [問題なし]
 

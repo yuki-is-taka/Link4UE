@@ -220,9 +220,7 @@ public:
 	const FString& GetChannelName() const { return ChannelName; }
 	uint64 GetCallbackCount() const { return CallbackCount.load(std::memory_order_relaxed); }
 	double GetCreationTime() const { return CreationTime; }
-	bool HasReceivedCallback() const { return bLoggedFirstCallback; }
-	uint32 GetOverrunCount() const { return 0; }
-	uint32 GetUnderrunCount() const { return 0; }
+	bool HasReceivedCallback() const { return bLoggedFirstCallback.load(std::memory_order_relaxed); }
 
 private:
 	void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle)
@@ -238,9 +236,8 @@ private:
 			return;
 		}
 
-		if (!bLoggedFirstCallback)
+		if (!bLoggedFirstCallback.exchange(true, std::memory_order_relaxed))
 		{
-			bLoggedFirstCallback = true;
 			UE_LOG(LogLink4UE, Warning,
 				TEXT("Link4UE Receive: first callback for '%s' (frames=%d, ch=%d, rate=%d)"),
 				*ChannelName, SrcFrames, SrcChannels, SrcRate);
@@ -364,13 +361,11 @@ struct ULink4UESubsystem::FLinkInstance
 			const auto& Recv = ActiveReceives[i];
 			const double Age = Now - Recv->GetCreationTime();
 			UE_LOG(LogLink4UE, Log,
-				TEXT("  Receive[%d] '%s': callbacks=%llu, age=%.1fs, hasReceived=%s, overruns=%u, underruns=%u"),
+				TEXT("  Receive[%d] '%s': callbacks=%llu, age=%.1fs, hasReceived=%s"),
 				i, *Recv->GetChannelName(),
 				Recv->GetCallbackCount(),
 				Age,
-				Recv->HasReceivedCallback() ? TEXT("YES") : TEXT("NO"),
-				Recv->GetOverrunCount(),
-				Recv->GetUnderrunCount());
+				Recv->HasReceivedCallback() ? TEXT("YES") : TEXT("NO"));
 		}
 	}
 
@@ -581,7 +576,7 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 	// and makes UE's master output available as a channel on the Link Audio network.
 	{
 		USoundSubmix& MasterSubmix = AudioDevice->GetMainSubmixObject();
-		FString MasterChannelName = Settings->PeerName;
+		FString MasterChannelName = TEXT("Main");
 
 		TSharedRef<FLink4UESendBridge, ESPMode::ThreadSafe> Bridge =
 			MakeShared<FLink4UESendBridge, ESPMode::ThreadSafe>(
