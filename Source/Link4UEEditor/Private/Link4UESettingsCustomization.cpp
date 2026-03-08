@@ -52,40 +52,50 @@ void FLink4UEAudioReceiveCustomization::CustomizeChildren(
 	IDetailChildrenBuilder& ChildBuilder,
 	IPropertyTypeCustomizationUtils& Utils)
 {
+	ChannelIdHandle = PropertyHandle->GetChildHandle(TEXT("ChannelId"));
 	ChannelNameHandle = PropertyHandle->GetChildHandle(TEXT("ChannelName"));
 	TSharedPtr<IPropertyHandle> SubmixHandle = PropertyHandle->GetChildHandle(TEXT("Submix"));
 
 	RefreshChannelOptions();
 
-	if (ChannelNameHandle.IsValid())
+	if (ChannelIdHandle.IsValid() && ChannelNameHandle.IsValid())
 	{
-		FString CurrentValue;
-		ChannelNameHandle->GetValue(CurrentValue);
+		// Determine initial selection from stored ChannelId (or ChannelName fallback)
+		FString CurrentId;
+		ChannelIdHandle->GetValue(CurrentId);
+		FString CurrentName;
+		ChannelNameHandle->GetValue(CurrentName);
 
-		TSharedPtr<FString> InitialSelection;
-		for (const TSharedPtr<FString>& Option : ChannelOptions)
+		TSharedPtr<FChannelOption> InitialSelection;
+		for (const TSharedPtr<FChannelOption>& Option : ChannelOptions)
 		{
-			if (*Option == CurrentValue)
+			if (!CurrentId.IsEmpty() && Option->Id == CurrentId)
+			{
+				InitialSelection = Option;
+				break;
+			}
+			if (CurrentId.IsEmpty() && !CurrentName.IsEmpty() && Option->Name == CurrentName)
 			{
 				InitialSelection = Option;
 				break;
 			}
 		}
 
-		ChildBuilder.AddCustomRow(NSLOCTEXT("Link4UE", "ChannelName", "Channel Name"))
+		ChildBuilder.AddCustomRow(NSLOCTEXT("Link4UE", "Channel", "Channel"))
 		.NameContent()
 		[
-			ChannelNameHandle->CreatePropertyNameWidget()
+			SNew(STextBlock)
+			.Text(NSLOCTEXT("Link4UE", "ChannelLabel", "Channel"))
+			.Font(IDetailLayoutBuilder::GetDetailFont())
 		]
 		.ValueContent()
 		.MinDesiredWidth(200.0f)
 		[
-			SAssignNew(ComboBoxWidget, SComboBox<TSharedPtr<FString>>)
+			SAssignNew(ComboBoxWidget, SComboBox<TSharedPtr<FChannelOption>>)
 			.OptionsSource(&ChannelOptions)
 			.InitiallySelectedItem(InitialSelection)
 			.OnComboBoxOpening_Lambda([this]()
 			{
-				// Refresh channel list each time the dropdown is opened
 				RefreshChannelOptions();
 				if (ComboBoxWidget.IsValid())
 				{
@@ -93,18 +103,19 @@ void FLink4UEAudioReceiveCustomization::CustomizeChildren(
 				}
 			})
 			.OnSelectionChanged_Lambda(
-				[this](TSharedPtr<FString> NewValue, ESelectInfo::Type)
+				[this](TSharedPtr<FChannelOption> NewValue, ESelectInfo::Type)
 				{
-					if (NewValue.IsValid() && ChannelNameHandle.IsValid())
+					if (NewValue.IsValid() && ChannelIdHandle.IsValid() && ChannelNameHandle.IsValid())
 					{
-						ChannelNameHandle->SetValue(*NewValue);
+						ChannelIdHandle->SetValue(NewValue->Id);
+						ChannelNameHandle->SetValue(NewValue->Name);
 					}
 				})
 			.OnGenerateWidget_Lambda(
-				[](TSharedPtr<FString> Item) -> TSharedRef<SWidget>
+				[](TSharedPtr<FChannelOption> Item) -> TSharedRef<SWidget>
 				{
-					FText DisplayText = (Item.IsValid() && !Item->IsEmpty())
-						? FText::FromString(*Item)
+					FText DisplayText = (Item.IsValid() && !Item->Name.IsEmpty())
+						? FText::FromString(Item->Name)
 						: NSLOCTEXT("Link4UE", "EmptyChannel", "(none)");
 					return SNew(STextBlock).Text(DisplayText);
 				})
@@ -117,9 +128,12 @@ void FLink4UEAudioReceiveCustomization::CustomizeChildren(
 					{
 						FString Value;
 						ChannelNameHandle->GetValue(Value);
-						return FText::FromString(Value);
+						if (!Value.IsEmpty())
+						{
+							return FText::FromString(Value);
+						}
 					}
-					return FText::GetEmpty();
+					return NSLOCTEXT("Link4UE", "EmptyChannel", "(none)");
 				})
 			]
 		];
@@ -135,8 +149,8 @@ void FLink4UEAudioReceiveCustomization::RefreshChannelOptions()
 {
 	ChannelOptions.Empty();
 
-	// Empty string option at top to allow clearing the selection
-	ChannelOptions.Add(MakeShared<FString>(FString()));
+	// Empty option to allow clearing the selection
+	ChannelOptions.Add(MakeShared<FChannelOption>());
 
 	if (GEngine)
 	{
@@ -145,7 +159,7 @@ void FLink4UEAudioReceiveCustomization::RefreshChannelOptions()
 			TArray<FLink4UEChannel> Channels = Subsystem->GetChannels();
 			for (const FLink4UEChannel& Ch : Channels)
 			{
-				ChannelOptions.Add(MakeShared<FString>(Ch.Name));
+				ChannelOptions.Add(MakeShared<FChannelOption>(FChannelOption{Ch.ChannelId, Ch.Name}));
 			}
 		}
 	}

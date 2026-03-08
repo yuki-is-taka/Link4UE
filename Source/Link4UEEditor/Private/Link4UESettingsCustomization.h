@@ -15,7 +15,7 @@ public:
 
 /**
  * Property type customization for FLink4UEAudioReceive.
- * Replaces the ChannelName text field with a dropdown of available LinkAudio channels.
+ * Replaces the ChannelName/ChannelId fields with a dropdown of available LinkAudio channels.
  */
 class FLink4UEAudioReceiveCustomization : public IPropertyTypeCustomization
 {
@@ -31,9 +31,16 @@ public:
 		IPropertyTypeCustomizationUtils& Utils) override;
 
 private:
+	struct FChannelOption
+	{
+		FString Id;   // hex, empty for "(none)"
+		FString Name; // display name
+	};
+
 	void RefreshChannelOptions();
 
+	TSharedPtr<IPropertyHandle> ChannelIdHandle;
 	TSharedPtr<IPropertyHandle> ChannelNameHandle;
-	TArray<TSharedPtr<FString>> ChannelOptions;
-	TSharedPtr<SComboBox<TSharedPtr<FString>>> ComboBoxWidget;
+	TArray<TSharedPtr<FChannelOption>> ChannelOptions;
+	TSharedPtr<SComboBox<TSharedPtr<FChannelOption>>> ComboBoxWidget;
 };

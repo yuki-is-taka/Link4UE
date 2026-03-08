@@ -36,13 +36,13 @@ struct LINK4UE_API FLink4UEAudioSend
 	GENERATED_BODY()
 
 	/** Source Submix to capture audio from. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	TSoftObjectPtr<USoundSubmix> Submix;
 
 	/** Channel name prefix advertised to peers.
 	 *  Empty = use the Submix asset name.
 	 *  For Submixes with 3+ channels, mono Sinks are named "{Prefix}_{index}". */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	FString ChannelNamePrefix;
 };
 
@@ -52,18 +52,22 @@ struct LINK4UE_API FLink4UEAudioReceive
 {
 	GENERATED_BODY()
 
-	/** LinkAudio channel name to subscribe to. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	/** Stable channel identifier (hex). Set by dropdown, not user-editable. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	FString ChannelId;
+
+	/** Channel display name (auto-updated on rename). */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	FString ChannelName;
 
 	/** Target Submix for audio output. Empty = Master Submix. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	TSoftObjectPtr<USoundSubmix> Submix;
 };
 
-DECLARE_MULTICAST_DELEGATE(FLink4UEOnSettingsChanged);
+DECLARE_MULTICAST_DELEGATE_OneParam(FLink4UEOnSettingsChanged, FName /*PropertyName*/);
 
-UCLASS(Config = Game, DefaultConfig, meta = (DisplayName = "Link4UE"))
+UCLASS(Config = Link4UE, meta = (DisplayName = "Link4UE"))
 class LINK4UE_API ULink4UESettings : public UDeveloperSettings
 {
 	GENERATED_BODY()

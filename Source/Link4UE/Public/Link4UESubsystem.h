@@ -178,11 +178,14 @@ private:
 	/** Rebuild Submix→LinkAudio send routes (depends on AudioDevice). */
 	void RebuildAudioSends(const ULink4UESettings* Settings);
 
-	/** Rebuild LinkAudio→AudioBus receive routes (depends on AudioBusSubsystem + channels). */
+	/** Rebuild LinkAudio→Submix receive routes (depends on AudioDevice + channels). */
 	void RebuildAudioReceives(const ULink4UESettings* Settings);
 
+	/** Sync channel names in settings from live session (handles peer renames). */
+	void SyncChannelNames();
+
 #if WITH_EDITOR
-	void OnSettingsChanged();
+	void OnSettingsChanged(FName PropertyName);
 	FDelegateHandle SettingsChangedHandle;
 #endif
 

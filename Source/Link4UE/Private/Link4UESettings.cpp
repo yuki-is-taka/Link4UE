@@ -29,7 +29,8 @@ FLink4UEOnSettingsChanged ULink4UESettings::OnSettingsChanged;
 void ULink4UESettings::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
 	Super::PostEditChangeProperty(PropertyChangedEvent);
-	OnSettingsChanged.Broadcast();
+	const FName PropName = PropertyChangedEvent.GetMemberPropertyName();
+	OnSettingsChanged.Broadcast(PropName);
 }
 
 FText ULink4UESettings::GetSectionText() const
