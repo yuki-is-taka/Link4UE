@@ -1,64 +1,63 @@
-# Link Audio SDK — Sink とピアディスカバリの仕組み
+# Link Audio SDK — Sink and Peer Discovery Mechanics
 
 > Date: 2026-03-08
 > SDK: Ableton Link Audio 4.0.0-beta2
 > Related: [audio-pipeline-redesign.md](audio-pipeline-redesign.md)
 
-## 結論
+## Conclusion
 
-**Sink (送信側) が存在しないと、リモートピアからの音声受信 (Source) は機能しない。**
-これは SDK のピアディスカバリプロトコルの設計上の制約であり、バグではない。
+**Without a Sink (send side), audio reception via Source does not work.**
+This is a design constraint of the SDK's peer discovery protocol, not a bug.
 
 ---
 
-## SDK のピアディスカバリプロトコル
+## SDK Peer Discovery Protocol
 
-### 用語整理
+### Terminology
 
-| SDK 用語 | 役割 | UE 側の対応 |
-|----------|------|-------------|
-| **Sink** | このピアの音声を**送出**する (UE → ネットワーク) | `FLink4UESendBridge` (ISubmixBufferListener) |
-| **Source** | リモートピアの音声を**受信**する (ネットワーク → UE) | `FLink4UEReceiveBridge` (USoundWaveProcedural) |
-| **ChannelAnnouncement** | このピアが持つ Sink の一覧をネットワークに広告する | 自動 (SDK 内部) |
-| **ChannelRequest** | リモートの Source がこのピアの Sink に接続を要求する | 自動 (SDK 内部) |
+| SDK Term | Role | UE Counterpart |
+|----------|------|----------------|
+| **Sink** | **Sends** this peer's audio to the network (UE → network) | `FLink4UESendBridge` (ISubmixBufferListener) |
+| **Source** | **Receives** a remote peer's audio from the network (network → UE) | `FLink4UEReceiveBridge` (USoundWaveProcedural) |
+| **ChannelAnnouncement** | Advertises this peer's Sinks to the network | Automatic (SDK internal) |
+| **ChannelRequest** | A remote Source requests connection to this peer's Sink | Automatic (SDK internal) |
 
-### 接続確立シーケンス
+### Connection Establishment Sequence
 
 ```
 Node A (UE)                              Node B (Ableton Live)
 ===========                              =====================
 
-1. Sink "MyPeer" を作成
+1. Create Sink "Main"
    |
    v
-2. PeerAnnouncement を UDP ブロードキャスト
-   (channelAnnouncements に Sink 情報を含む)
+2. UDP broadcast PeerAnnouncement
+   (includes Sink info in channelAnnouncements)
    ─────────────────────────────────────>
-                                         3. アナウンスメントを受信
-                                            "MyPeer" チャンネルを発見
+                                         3. Receive announcement
+                                            Discover "Main" channel
                                             |
                                             v
-                                         4. Source を作成、ChannelRequest 送信
+                                         4. Create Source, send ChannelRequest
    <─────────────────────────────────────
-5. SinkProcessor が ChannelRequest を受信
-   mReceivers に追加
+5. SinkProcessor receives ChannelRequest
+   Add to mReceivers
    Sink.mIsConnected = true
    |
    v
-6. Sink.retainBuffer() が有効になる
-   → オーディオデータの送出開始
+6. Sink.retainBuffer() becomes active
+   → Audio data transmission begins
    ─────────────────────────────────────>
-                                         7. Source でオーディオ受信
+                                         7. Source receives audio
 ```
 
-**重要**: ステップ 2 の `channelAnnouncements()` が空の場合、Node B は Node A のチャンネルを
-発見できないため、ステップ 4 以降が起きない。
+**Critical**: If `channelAnnouncements()` is empty at step 2, Node B cannot discover Node A's channels, so steps 4 onward never occur.
 
 ---
 
-## SDK ソースコードの根拠
+## SDK Source Code Evidence
 
-### channelAnnouncements() は Sink からのみ構築される
+### channelAnnouncements() is built from Sinks only
 
 **`MainProcessor.hpp:191-200`**:
 ```cpp
@@ -74,9 +73,9 @@ ChannelAnnouncements channelAnnouncements() const
 }
 ```
 
-Source は `channelAnnouncements` に含まれない。Sink のみが広告される。
+Sources are not included in `channelAnnouncements`. Only Sinks are advertised.
 
-### Sink は接続されるまでバッファを確保しない
+### Sinks do not allocate buffers until connected
 
 **`Sink.hpp:58-79`**:
 ```cpp
@@ -85,28 +84,27 @@ Buffer<int16_t>* retainBuffer()
   auto queueWriter = mQueue.writer();
   if (!mIsConnected || queueWriter.numRetainedSlots() > 0)
   {
-    return nullptr;  // 未接続ならバッファなし
+    return nullptr;  // No buffer if not connected
   }
-  // ... バッファ確保
+  // ... buffer allocation
 }
 ```
 
-`mIsConnected` は `SinkProcessor::receiveChannelRequest()` で true に設定される。
-つまり、リモートの Source が ChannelRequest を送るまで Sink は実質的に休眠状態。
+`mIsConnected` is set to true by `SinkProcessor::receiveChannelRequest()`. The Sink remains dormant until a remote Source sends a ChannelRequest.
 
-### SinkProcessor はレシーバーが空なら送信しない
+### SinkProcessor does not transmit without receivers
 
 **`SinkProcessor.hpp:105-107`**:
 ```cpp
 if (!mReceivers.empty() && mQueueReader[0]->mTempo > link::Tempo{0})
 {
-  mEncoder(*mQueueReader[0]);  // レシーバーが存在するときのみエンコード
+  mEncoder(*mQueueReader[0]);  // Encode only when receivers exist
 }
 ```
 
-### PeerAnnouncement に channelAnnouncements が含まれる
+### PeerAnnouncement includes channelAnnouncements
 
-**`Controller.hpp:174`** (updateAudioDiscovery 内):
+**`Controller.hpp:174`** (inside updateAudioDiscovery):
 ```cpp
 mGateways.updateAnnouncement(PeerAnnouncement{
   this->mNodeId, this->mSessionId, mPeerInfo, mProcessor.channelAnnouncements()});
@@ -114,46 +112,46 @@ mGateways.updateAnnouncement(PeerAnnouncement{
 
 ---
 
-## なぜ「Sink がないと Source (受信) も動かない」のか
+## Why "No Sink Means No Source (Receive)"
 
-一見すると矛盾しているように見える — Source (受信) が欲しいのに、なぜ Sink (送信) が必要なのか？
+At first glance this seems contradictory — you want a Source (receive), so why is a Sink (send) required?
 
-### SDK の設計思想
+### SDK Design Philosophy
 
-Link Audio のプロトコルは **双方向チャンネル** を前提としている:
+The Link Audio protocol assumes **bidirectional channels**:
 
-1. ピア A が Sink を作成 → チャンネル "X" をネットワークに広告
-2. ピア B がチャンネル "X" を発見 → Source を作成してピア A に接続要求
-3. ピア A は **接続されたことを検知** → 音声送出を開始
-4. ピア B は音声を受信
+1. Peer A creates a Sink → advertises channel "X" on the network
+2. Peer B discovers channel "X" → creates a Source and sends a connection request to Peer A
+3. Peer A **detects the connection** → begins transmitting audio
+4. Peer B receives the audio
 
-**ピア A (UE) の視点**:
-- Sink = 「このチャンネルを持っている」というネットワーク上の宣言
-- Source = 「あのチャンネルのデータが欲しい」というリクエスト
+**From Peer A's (UE) perspective**:
+- Sink = a declaration on the network: "I have this channel"
+- Source = a request: "I want data from that channel"
 
-**Sink なしだと**:
-- UE は何もアナウンスしない → Ableton Live から UE のチャンネルが見えない
-- Live が UE にオーディオを送る宛先がない
-- `channelAnnouncements()` が空のため、Live 側で UE のチャンネルを選択する UI にも表示されない
+**Without a Sink**:
+- UE announces nothing → Ableton Live cannot see any UE channels
+- Live has no destination to send audio to
+- `channelAnnouncements()` is empty, so UE's channels do not appear in Live's channel selection UI
 
-### つまり
+### In Short
 
-Sink は「送信のため」だけでなく、**ネットワーク上でこのピアの存在を可視化するため** に必要。
-Sink がない Link Audio ピアは、ネットワーク上では「オーディオ機能を持たないピア」として扱われる。
+A Sink is needed not just "for sending" but **to make this peer visible on the network as an audio-capable participant**. A Link Audio peer without any Sinks is treated as "a peer with no audio capabilities" by the network.
 
 ---
 
-## Link4UE の現行実装: Master Sink の自動作成
+## Link4UE Implementation: Auto Master Sink
 
-### 実装箇所
+### Implementation Location
 
-**`Link4UESubsystem.cpp:568-586`** (`RebuildAudioSends` 内):
+**`Link4UESubsystem.cpp`** (inside `RebuildAudioSends`):
 
 ```cpp
-// Always create a Sink for the master submix output.
+// Ensure master send exists (required by SDK for peers to establish audio return paths).
+if (!LinkInstance->MasterSend.Bridge.IsValid())
 {
     USoundSubmix& MasterSubmix = AudioDevice->GetMainSubmixObject();
-    FString MasterChannelName = Settings->PeerName;
+    FString MasterChannelName = TEXT("Main");
 
     TSharedRef<FLink4UESendBridge, ESPMode::ThreadSafe> Bridge =
         MakeShared<FLink4UESendBridge, ESPMode::ThreadSafe>(
@@ -166,53 +164,50 @@ Sink がない Link Audio ピアは、ネットワーク上では「オーディ
 }
 ```
 
-### 動作条件
+### Activation Conditions
 
-| 条件 | 詳細 |
-|------|------|
-| `bEnableLinkAudio == true` | Link Audio が有効であること |
-| `GetMainAudioDevice() != nullptr` | AudioDevice が利用可能であること |
+| Condition | Details |
+|-----------|---------|
+| `bEnableLinkAudio == true` | Link Audio must be enabled |
+| `GetMainAudioDevice() != nullptr` | AudioDevice must be available |
 
-AudioDevice が未初期化の場合、`bSendRoutesPending = true` にして遅延再試行する。
+If AudioDevice is not initialized, `bSendRoutesPending = true` triggers deferred retry.
 
-### ユーザー設定の Send との関係
+### Relationship to User-Configured Sends
 
 ```
 RebuildAudioSends()
     |
-    +-- Master Sink (無条件作成)
-    |       チャンネル名 = Settings->PeerName
+    +-- Master Sink (unconditional, preserved across rebuilds)
+    |       Channel name = "Main"
     |       Submix = GetMainSubmixObject()
-    |       格納先 = LinkInstance->MasterSend
+    |       Stored in = LinkInstance->MasterSend
     |
-    +-- ユーザー設定 Sends (AudioSends 配列から作成)
-            チャンネル名 = ChannelNamePrefix (空の場合 Submix 名)
-            Submix = ユーザー指定 (空 = Master)
-            格納先 = LinkInstance->ActiveSends[]
+    +-- User Sends (created from AudioSends array, diff-based)
+            Channel name = ChannelNamePrefix (or Submix name if empty)
+            Submix = user-specified (empty = Master)
+            Stored in = LinkInstance->ActiveSends[]
 ```
 
-- Master Sink は **常に最初に作成** される
-- ユーザーが `AudioSends` を一つも設定していなくても、Master Sink は作成される
-- これにより、最低限のネットワーク可視性が保証される
+- Master Sink is **always created first** and preserved across user send changes
+- Even with zero user-configured `AudioSends`, the Master Sink is created
+- This guarantees minimum network visibility
 
-### Master Sink が送出する音声
+### Audio Transmitted by Master Sink
 
-Master Submix の `ISubmixBufferListener` として登録されるため、**UE の最終ミックス出力** がキャプチャされ、
-Link Audio ネットワーク上のチャンネルとして送出される。
+Registered as an `ISubmixBufferListener` on the Master Submix, it captures **UE's final mix output** and transmits it as a Link Audio channel.
 
-これは意図的な設計:
-- UE の音をリモートピア (DAW 等) でモニターできる
-- Receive で受信した音が Master Submix を通る場合、**フィードバックループのリスク** がある
-  → Receive の出力先を Master 以外の Submix に設定するか、Send 側で別の Submix を使うことで回避
+This is intentional:
+- UE's audio can be monitored in a remote peer (DAW, etc.)
+- If Receive output targets the Master Submix, there is a **feedback loop risk** → route Receive output to a different Submix, or use a different Submix for sending
 
 ---
 
-## 新パイプライン設計への影響
+## Impact on New Pipeline Design
 
-パイプライン再設計 (USoundWaveProcedural 方式) においても:
+With the USoundWaveProcedural pipeline:
 
-1. **Master Sink の自動作成は維持する** — SDK 要件のため廃止不可
-2. **Send 側のコードは変更不要** — ISubmixBufferListener ベースの既存実装がそのまま使える
-3. **Receive (Source) は Sink の存在に依存する** ことを UI/ドキュメントで明示すべき
-4. **フィードバック防止**: Receive の出力 Submix と Master Sink のキャプチャ Submix が
-   同じ場合にフィードバックが起きる。設定 UI で警告するか、Submix 分離を推奨する
+1. **Auto Master Sink creation is maintained** — cannot be removed (SDK requirement)
+2. **Send-side code is unchanged** — existing ISubmixBufferListener implementation works as-is
+3. **Receive (Source) depends on Sink existence** — this should be made clear in UI/documentation
+4. **Feedback prevention**: If a Receive's output Submix is the same as the Master Sink's capture Submix, feedback occurs. The settings UI should warn about this or recommend Submix separation
