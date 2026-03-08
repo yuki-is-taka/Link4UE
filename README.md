@@ -173,10 +173,6 @@ Multiple receives can reference the same remote channel with different target Su
 | `EnableLinkAudio(bEnable)` | Toggle Link Audio at runtime |
 | `SetPeerName(Name)` | Change the advertised peer name |
 
-### Latency
-
-The end-to-end latency is approximately **45–67 ms** (LAN). This is suitable for gameplay synchronization and BGM streaming, but not for real-time performance monitoring. See [Docs/audio-pipeline-redesign.md](Docs/audio-pipeline-redesign.md) for a detailed latency breakdown.
-
 ---
 
 ## Third-Party

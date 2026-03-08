@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0",
+	"VersionName": "0.1.0-beta",
 	"FriendlyName": "Link4UE",
 	"Description": "Ableton Link integration for Unreal Engine. Provides tempo sync, beat/phase callbacks, start/stop sync, and LinkAudio channel discovery across Link-enabled applications on the local network.",
 	"Category": "Audio",
