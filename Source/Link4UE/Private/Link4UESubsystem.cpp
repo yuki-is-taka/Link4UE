@@ -802,7 +802,8 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		USoundSubmix* Submix = SendDef.Submix.LoadSynchronous();
 		if (!Submix)
 		{
-			continue;
+			// Empty Submix → fall back to Main Submix
+			Submix = &AudioDevice->GetMainSubmixObject();
 		}
 		FString ChannelName = SendDef.ChannelNamePrefix.IsEmpty()
 			? Submix->GetName()
