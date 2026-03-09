@@ -1,7 +1,9 @@
 // Copyright YUKITAKA. All Rights Reserved.
 
 #include "Link4UESubsystem.h"
-#include "Link4UESettings.h"
+#if WITH_EDITOR
+#include "ISettingsModule.h"
+#endif
 #include "AudioDevice.h"
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
@@ -545,15 +547,14 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	// Read settings
-	const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
-	const double QuantumBeats = Link4UEQuantumToBeats(Settings->DefaultQuantum);
-	Snapshot.Tempo = Settings->DefaultTempo;
+	// Read config properties (loaded from INI by UObject::LoadConfig)
+	const double QuantumBeats = Link4UEQuantumToBeats(DefaultQuantum);
+	Snapshot.Tempo = DefaultTempo;
 	Snapshot.Quantum = QuantumBeats;
 	Quantum.store(QuantumBeats, std::memory_order_relaxed);
 
-	LinkInstance = new FLinkInstance(Settings->DefaultTempo,
-		TCHAR_TO_UTF8(*Settings->PeerName));
+	LinkInstance = new FLinkInstance(DefaultTempo,
+		TCHAR_TO_UTF8(*PeerName));
 
 	// Register Link-thread callbacks — store values atomically, consume on GameThread
 	LinkInstance->Link.setNumPeersCallback([this](std::size_t InNumPeers)
@@ -585,7 +586,7 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	});
 
 	// Apply settings
-	ApplySettings(Settings);
+	ApplySettings();
 
 	// Capture initial channel snapshot for diff logging
 	LinkInstance->LogChannelDiff();
@@ -595,8 +596,15 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 		this, &ULink4UESubsystem::OnAudioDeviceCreated);
 
 #if WITH_EDITOR
-	SettingsChangedHandle = ULink4UESettings::OnSettingsChanged.AddUObject(
-		this, &ULink4UESubsystem::OnSettingsChanged);
+	ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
+	if (SettingsModule)
+	{
+		SettingsModule->RegisterSettings(
+			TEXT("Project"), TEXT("Plugins"), TEXT("Link4UE"),
+			NSLOCTEXT("Link4UE", "SettingsSection", "Link4UE"),
+			NSLOCTEXT("Link4UE", "SettingsDescription", "Ableton Link synchronization settings."),
+			this);
+	}
 #endif
 }
 
@@ -605,7 +613,11 @@ void ULink4UESubsystem::Deinitialize()
 	FAudioDeviceManagerDelegates::OnAudioDeviceCreated.Remove(AudioDeviceCreatedHandle);
 
 #if WITH_EDITOR
-	ULink4UESettings::OnSettingsChanged.Remove(SettingsChangedHandle);
+	ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
+	if (SettingsModule)
+	{
+		SettingsModule->UnregisterSettings(TEXT("Project"), TEXT("Plugins"), TEXT("Link4UE"));
+	}
 #endif
 	FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
 
@@ -648,7 +660,7 @@ void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
 	// Rebuild send routes (re-registers SubmixBufferListeners with new device)
 	if (bSendRoutesPending)
 	{
-		RebuildAudioSends(GetDefault<ULink4UESettings>());
+		RebuildAudioSends();
 	}
 
 	// Update receive bridges in-place — no LinkAudioSource destruction,
@@ -664,46 +676,45 @@ void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
 // Settings hot-reload
 // ---------------------------------------------------------------------------
 
-void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
+void ULink4UESubsystem::ApplySettings()
 {
-	if (!LinkInstance || !Settings)
+	if (!LinkInstance)
 	{
 		return;
 	}
 
-	LinkInstance->Link.enableStartStopSync(Settings->bStartStopSync);
-	LinkInstance->Link.enableLinkAudio(Settings->bEnableLinkAudio);
-	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*Settings->PeerName));
-	LinkInstance->Link.enable(Settings->bAutoConnect);
+	LinkInstance->Link.enableStartStopSync(bStartStopSync);
+	LinkInstance->Link.enableLinkAudio(bEnableLinkAudio);
+	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+	LinkInstance->Link.enable(bAutoConnect);
 
-	const double Q = Link4UEQuantumToBeats(Settings->DefaultQuantum);
+	const double Q = Link4UEQuantumToBeats(DefaultQuantum);
 	Quantum.store(Q, std::memory_order_relaxed);
 
-	SetTempo(Settings->DefaultTempo);
+	SetTempo(DefaultTempo);
 
 	bIsRebuilding = true;
-	RebuildAudioSends(Settings);
-	RebuildAudioReceives(Settings);
+	RebuildAudioSends();
+	RebuildAudioReceives();
 	bIsRebuilding = false;
-	// Drain any channel-dirty flags caused by our own Sink/Source creation/destruction
 	bChannelsDirty.store(false, std::memory_order_relaxed);
 
 	UE_LOG(LogLink4UE, Log,
 		TEXT("Link4UE: Settings applied — tempo=%.1f, connect=%s, audio=%s, peer='%s'"),
-		Settings->DefaultTempo,
-		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
-		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"),
-		*Settings->PeerName);
+		DefaultTempo,
+		bAutoConnect ? TEXT("on") : TEXT("off"),
+		bEnableLinkAudio ? TEXT("on") : TEXT("off"),
+		*PeerName);
 }
 
-void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
+void ULink4UESubsystem::RebuildAudioSends()
 {
-	if (!LinkInstance || !Settings)
+	if (!LinkInstance)
 	{
 		return;
 	}
 
-	if (!Settings->bEnableLinkAudio)
+	if (!bEnableLinkAudio)
 	{
 		LinkInstance->TearDownAllSends();
 		bSendRoutesPending = false;
@@ -744,7 +755,7 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 	// Build desired list from settings
 	struct FDesiredSend { USoundSubmix* Submix; FString ChannelName; };
 	TArray<FDesiredSend> Desired;
-	for (const FLink4UEAudioSend& SendDef : Settings->AudioSends)
+	for (const FLink4UEAudioSend& SendDef : AudioSends)
 	{
 		USoundSubmix* Submix = SendDef.Submix.LoadSynchronous();
 		if (!Submix)
@@ -856,14 +867,14 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 	bSendRoutesPending = false;
 }
 
-void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
+void ULink4UESubsystem::RebuildAudioReceives()
 {
-	if (!LinkInstance || !Settings)
+	if (!LinkInstance)
 	{
 		return;
 	}
 
-	if (!Settings->bEnableLinkAudio)
+	if (!bEnableLinkAudio)
 	{
 		LinkInstance->TearDownReceives();
 		bReceiveRoutesPending = false;
@@ -903,7 +914,7 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 	};
 	TMap<FString, FDesiredChannel> DesiredMap; // Key = ChannelIdHex
 
-	for (const FLink4UEAudioReceive& RecvDef : Settings->AudioReceives)
+	for (const FLink4UEAudioReceive& RecvDef : AudioReceives)
 	{
 		if (RecvDef.ChannelId.IsEmpty() && RecvDef.ChannelName.IsEmpty())
 		{
@@ -1051,10 +1062,9 @@ void ULink4UESubsystem::SyncChannelNames()
 	}
 
 	const auto AllChannels = LinkInstance->Link.channels();
-	ULink4UESettings* MutableSettings = GetMutableDefault<ULink4UESettings>();
 	bool bAnyChanged = false;
 
-	for (FLink4UEAudioReceive& Recv : MutableSettings->AudioReceives)
+	for (FLink4UEAudioReceive& Recv : AudioReceives)
 	{
 		if (Recv.ChannelId.IsEmpty())
 		{
@@ -1081,39 +1091,40 @@ void ULink4UESubsystem::SyncChannelNames()
 
 	if (bAnyChanged)
 	{
-		MutableSettings->SaveConfig();
+		SaveConfig();
 	}
 }
 
 #if WITH_EDITOR
-void ULink4UESubsystem::OnSettingsChanged(FName PropertyName)
+void ULink4UESubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
-	const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
-	if (!LinkInstance || !Settings)
+	Super::PostEditChangeProperty(PropertyChangedEvent);
+
+	if (!LinkInstance)
 	{
 		return;
 	}
 
-	// Audio routing properties — rebuild only the affected side
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESettings, AudioSends))
+	const FName PropName = PropertyChangedEvent.GetMemberPropertyName();
+
+	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends))
 	{
 		bIsRebuilding = true;
-		RebuildAudioSends(Settings);
+		RebuildAudioSends();
 		bIsRebuilding = false;
 		bChannelsDirty.store(false, std::memory_order_relaxed);
 		return;
 	}
-	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESettings, AudioReceives))
+	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioReceives))
 	{
 		bIsRebuilding = true;
-		RebuildAudioReceives(Settings);
+		RebuildAudioReceives();
 		bIsRebuilding = false;
 		bChannelsDirty.store(false, std::memory_order_relaxed);
 		return;
 	}
 
-	// Everything else — full apply
-	ApplySettings(Settings);
+	ApplySettings();
 }
 #endif
 
@@ -1177,7 +1188,7 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Channels changed, rebuilding receive routes"));
 			bIsRebuilding = true;
 			SyncChannelNames();
-			RebuildAudioReceives(GetDefault<ULink4UESettings>());
+			RebuildAudioReceives();
 			bIsRebuilding = false;
 			bChannelsDirty.store(false, std::memory_order_relaxed);
 		}
@@ -1190,17 +1201,16 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 		FAudioDevice* AudioDevice = GetMainAudioDevice();
 		if (AudioDevice)
 		{
-			const ULink4UESettings* Settings = GetDefault<ULink4UESettings>();
 			bIsRebuilding = true;
 			if (bSendRoutesPending)
 			{
 				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred send routes"));
-				RebuildAudioSends(Settings);
+				RebuildAudioSends();
 			}
 			if (bReceiveRoutesPending)
 			{
 				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred receive routes"));
-				RebuildAudioReceives(Settings);
+				RebuildAudioReceives();
 			}
 			bIsRebuilding = false;
 			bChannelsDirty.store(false, std::memory_order_relaxed);

@@ -5,7 +5,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/EngineSubsystem.h"
 #include "AudioDeviceHandle.h"
-#include "Link4UESettings.h"
+#include "Link4UETypes.h"
 #include "Link4UESubsystem.generated.h"
 
 /** Snapshot of Link session state, captured once per frame. */
@@ -74,7 +74,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FLink4UEOnChannelsChanged);
  * Engine-lifetime subsystem that owns the Ableton Link instance.
  * One per process — safe across PIE sessions and editor use.
  */
-UCLASS()
+UCLASS(Config = EditorPerProjectUserSettings)
 class LINK4UE_API ULink4UESubsystem : public UEngineSubsystem
 {
 	GENERATED_BODY()
@@ -86,6 +86,49 @@ public:
 	// USubsystem interface
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
+
+#if WITH_EDITOR
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
+#endif
+
+	// --- Connection ---
+
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Auto Connect"))
+	bool bAutoConnect = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Start/Stop Sync"))
+	bool bStartStopSync = true;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Enable Link Audio"))
+	bool bEnableLinkAudio = false;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Connection", meta = (
+		DisplayName = "Peer Name"))
+	FString PeerName = TEXT("Unreal");
+
+	// --- Defaults ---
+
+	UPROPERTY(Config, EditAnywhere, Category = "Defaults", meta = (
+		DisplayName = "Default Tempo (BPM)",
+		ClampMin = "20.0", ClampMax = "999.0"))
+	double DefaultTempo = 120.0;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Defaults", meta = (
+		DisplayName = "Default Quantum"))
+	ELink4UEQuantum DefaultQuantum = ELink4UEQuantum::Bar_1;
+
+	// --- Audio Routing ---
+
+	UPROPERTY(Config, EditAnywhere, Category = "Audio Routing", meta = (
+		DisplayName = "Audio Sends"))
+	TArray<FLink4UEAudioSend> AudioSends;
+
+	UPROPERTY(Config, EditAnywhere, Category = "Audio Routing", meta = (
+		DisplayName = "Audio Receives"))
+	TArray<FLink4UEAudioReceive> AudioReceives;
 
 	// --- Query (GameThread) ---
 
@@ -173,21 +216,16 @@ public:
 
 private:
 	/** Apply all settings to the Link instance. */
-	void ApplySettings(const ULink4UESettings* Settings);
+	void ApplySettings();
 
 	/** Rebuild Submix→LinkAudio send routes (depends on AudioDevice). */
-	void RebuildAudioSends(const ULink4UESettings* Settings);
+	void RebuildAudioSends();
 
 	/** Rebuild LinkAudio→Submix receive routes (depends on AudioDevice + channels). */
-	void RebuildAudioReceives(const ULink4UESettings* Settings);
+	void RebuildAudioReceives();
 
-	/** Sync channel names in settings from live session (handles peer renames). */
+	/** Sync channel names from live session (handles peer renames). */
 	void SyncChannelNames();
-
-#if WITH_EDITOR
-	void OnSettingsChanged(FName PropertyName);
-	FDelegateHandle SettingsChangedHandle;
-#endif
 
 	/** Per-frame tick driven by FTSTicker. */
 	bool Tick(float DeltaTime);

@@ -2,7 +2,7 @@
 
 #include "Modules/ModuleManager.h"
 #include "PropertyEditorModule.h"
-#include "Link4UESettings.h"
+#include "Link4UESubsystem.h"
 #include "Link4UESettingsCustomization.h"
 
 class FLink4UEEditorModule : public IModuleInterface
@@ -14,7 +14,7 @@ public:
 			FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
 
 		PropertyModule.RegisterCustomClassLayout(
-			ULink4UESettings::StaticClass()->GetFName(),
+			ULink4UESubsystem::StaticClass()->GetFName(),
 			FOnGetDetailCustomizationInstance::CreateStatic(
 				&FLink4UESettingsCustomization::MakeInstance));
 
@@ -31,7 +31,7 @@ public:
 			FPropertyEditorModule& PropertyModule =
 				FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
 			PropertyModule.UnregisterCustomClassLayout(
-				ULink4UESettings::StaticClass()->GetFName());
+				ULink4UESubsystem::StaticClass()->GetFName());
 			PropertyModule.UnregisterCustomPropertyTypeLayout(
 				TEXT("Link4UEAudioReceive"));
 		}
