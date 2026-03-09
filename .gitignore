@@ -2,6 +2,9 @@
 Binaries/
 Intermediate/
 
+# macOS
+.DS_Store
+
 # IDE
 .vs/
 *.sln
