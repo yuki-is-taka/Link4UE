@@ -165,7 +165,6 @@ public:
 		: ChannelIdHex(NodeIdToHex(InChannelId))
 		, DeviceSampleRate(InDeviceSampleRate)
 		, ChannelName(InChannelName)
-		, CreationTime(FPlatformTime::Seconds())
 		, Source(InLink, InChannelId,
 			[this](ableton::LinkAudioSource::BufferHandle BufferHandle)
 			{
@@ -173,7 +172,7 @@ public:
 			})
 	{
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: ReceiveBridge constructed for '%s' (id=%s, deviceRate=%d)"),
+			TEXT("Link4UE: Receive bridge created — '%s' (id=%s, rate=%d)"),
 			*ChannelName, *ChannelIdHex, InDeviceSampleRate);
 	}
 
@@ -209,7 +208,7 @@ public:
 		}
 
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: ReceiveBridge '%s' sample rate updated %d → %d"),
+			TEXT("Link4UE: Receive bridge '%s' sample rate changed — %d -> %d"),
 			*ChannelName, OldRate, NewRate);
 
 		for (FOutput& Out : Outputs)
@@ -275,9 +274,9 @@ public:
 		AudioDevice->AddNewActiveSound(NewActiveSound);
 
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: ReceiveBridge '%s' output added → Submix '%s'"),
+			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s'"),
 			*ChannelName,
-			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("(Master)"));
+			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("Master"));
 	}
 
 	void RemoveOutput(int32 Index, FAudioDevice* AudioDevice)
@@ -292,10 +291,10 @@ public:
 			AudioDevice->StopSoundsUsingResource(Out.ProceduralSound.Get());
 		}
 		const FString SubmixName = Out.TargetSubmix.IsValid()
-			? Out.TargetSubmix->GetName() : TEXT("(Master)");
+			? Out.TargetSubmix->GetName() : TEXT("Master");
 		Outputs.RemoveAt(Index);
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: ReceiveBridge '%s' output removed → Submix '%s'"),
+			TEXT("Link4UE: Receive output removed — '%s' -> Submix '%s'"),
 			*ChannelName, *SubmixName);
 	}
 
@@ -308,15 +307,10 @@ public:
 	const FString& GetChannelIdHex() const { return ChannelIdHex; }
 	const FString& GetChannelName() const { return ChannelName; }
 	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
-	uint64 GetCallbackCount() const { return CallbackCount.load(std::memory_order_relaxed); }
-	double GetCreationTime() const { return CreationTime; }
-	bool HasReceivedCallback() const { return bLoggedFirstCallback.load(std::memory_order_relaxed); }
 
 private:
 	void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle)
 	{
-		CallbackCount.fetch_add(1, std::memory_order_relaxed);
-
 		const int32 SrcRate = static_cast<int32>(Handle.info.sampleRate);
 		const int32 SrcFrames = static_cast<int32>(Handle.info.numFrames);
 		const int32 SrcChannels = static_cast<int32>(Handle.info.numChannels);
@@ -324,13 +318,6 @@ private:
 		if (SrcFrames == 0 || SrcChannels == 0)
 		{
 			return;
-		}
-
-		if (!bLoggedFirstCallback.exchange(true, std::memory_order_relaxed))
-		{
-			UE_LOG(LogLink4UE, Warning,
-				TEXT("Link4UE Receive: first callback for '%s' (frames=%d, ch=%d, rate=%d)"),
-				*ChannelName, SrcFrames, SrcChannels, SrcRate);
 		}
 
 		const uint8* AudioData;
@@ -385,12 +372,9 @@ private:
 	FString ChannelIdHex;
 	std::atomic<int32> DeviceSampleRate;
 	FString ChannelName;
-	double CreationTime;
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
-	std::atomic<bool> bLoggedFirstCallback{false};
-	std::atomic<uint64> CallbackCount{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -441,9 +425,9 @@ struct ULink4UESubsystem::FLinkInstance
 			}
 			if (!bFound)
 			{
-				UE_LOG(LogLink4UE, Warning,
-					TEXT("Link4UE ChannelDiff: REMOVED id=%s name='%s' peer='%s'"),
-					*Prev.Id, *Prev.Name, *Prev.PeerName);
+				UE_LOG(LogLink4UE, Log,
+					TEXT("Link4UE: Channel removed — '%s' (peer='%s', id=%s)"),
+					*Prev.Name, *Prev.PeerName, *Prev.Id);
 			}
 		}
 
@@ -462,17 +446,17 @@ struct ULink4UESubsystem::FLinkInstance
 
 			if (!Prev)
 			{
-				UE_LOG(LogLink4UE, Warning,
-					TEXT("Link4UE ChannelDiff: ADDED   id=%s name='%s' peer='%s'"),
-					*Cur.Id, *Cur.Name, *Cur.PeerName);
+				UE_LOG(LogLink4UE, Log,
+					TEXT("Link4UE: Channel added — '%s' (peer='%s', id=%s)"),
+					*Cur.Name, *Cur.PeerName, *Cur.Id);
 			}
 			else
 			{
 				if (Prev->Name != Cur.Name || Prev->PeerName != Cur.PeerName)
 				{
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE ChannelDiff: RENAMED id=%s '%s' → '%s' (peer: '%s' → '%s')"),
-						*Cur.Id, *Prev->Name, *Cur.Name, *Prev->PeerName, *Cur.PeerName);
+					UE_LOG(LogLink4UE, Log,
+						TEXT("Link4UE: Channel renamed — '%s' -> '%s' (peer='%s', id=%s)"),
+						*Prev->Name, *Cur.Name, *Cur.PeerName, *Cur.Id);
 				}
 			}
 		}
@@ -497,50 +481,9 @@ struct ULink4UESubsystem::FLinkInstance
 	// The SDK requires at least one Sink for peers to establish the audio return path.
 	FActiveSend MasterSend;
 
-	float HealthCheckTimer = 0.f;
-
 	FLinkInstance(double BPM, const std::string& PeerName)
 		: Link(BPM, PeerName)
 	{
-	}
-
-	void HealthCheckTick(float DeltaTime)
-	{
-		HealthCheckTimer += DeltaTime;
-		if (HealthCheckTimer < 5.0f)
-		{
-			return;
-		}
-		HealthCheckTimer = 0.f;
-
-		const double Now = FPlatformTime::Seconds();
-		const bool bLinkEnabled = Link.isEnabled();
-		const bool bAudioEnabled = Link.isLinkAudioEnabled();
-		const auto AllChannels = Link.channels();
-		const int32 NumPeers = static_cast<int32>(Link.numPeers());
-
-		const bool bHasMasterSend = MasterSend.Bridge.IsValid();
-		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE Health: peers=%d, link=%s, audio=%s, channels=%d, masterSend=%s, sends=%d, receives=%d"),
-			NumPeers,
-			bLinkEnabled ? TEXT("ON") : TEXT("OFF"),
-			bAudioEnabled ? TEXT("ON") : TEXT("OFF"),
-			static_cast<int32>(AllChannels.size()),
-			bHasMasterSend ? TEXT("YES") : TEXT("NO"),
-			ActiveSends.Num(),
-			ActiveReceives.Num());
-
-		for (int32 i = 0; i < ActiveReceives.Num(); ++i)
-		{
-			const auto& Recv = ActiveReceives[i];
-			const double Age = Now - Recv->GetCreationTime();
-			UE_LOG(LogLink4UE, Log,
-				TEXT("  Receive[%d] '%s': callbacks=%llu, age=%.1fs, hasReceived=%s"),
-				i, *Recv->GetChannelName(),
-				Recv->GetCallbackCount(),
-				Age,
-				Recv->HasReceivedCallback() ? TEXT("YES") : TEXT("NO"));
-		}
 	}
 
 	void TearDownMasterSend()
@@ -668,6 +611,10 @@ void ULink4UESubsystem::Deinitialize()
 
 	if (LinkInstance)
 	{
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: Shutting down (sends=%d, receives=%d)"),
+			LinkInstance->ActiveSends.Num(), LinkInstance->ActiveReceives.Num());
+
 		LinkInstance->TearDownReceives();
 		LinkInstance->TearDownAllSends();
 		LinkInstance->Link.enableLinkAudio(false);
@@ -675,8 +622,6 @@ void ULink4UESubsystem::Deinitialize()
 		delete LinkInstance;
 		LinkInstance = nullptr;
 	}
-
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE subsystem deinitialized"));
 	Super::Deinitialize();
 }
 
@@ -698,7 +643,7 @@ void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
 	}
 
 	UE_LOG(LogLink4UE, Log,
-		TEXT("Link4UE: OnAudioDeviceCreated (id=%u)"), DeviceId);
+		TEXT("Link4UE: Audio device created (id=%u)"), DeviceId);
 
 	// Rebuild send routes (re-registers SubmixBufferListeners with new device)
 	if (bSendRoutesPending)
@@ -743,7 +688,8 @@ void ULink4UESubsystem::ApplySettings(const ULink4UESettings* Settings)
 	// Drain any channel-dirty flags caused by our own Sink/Source creation/destruction
 	bChannelsDirty.store(false, std::memory_order_relaxed);
 
-	UE_LOG(LogLink4UE, Log, TEXT("Link4UE settings applied (tempo=%.1f, auto=%s, audio=%s, peer=%s)"),
+	UE_LOG(LogLink4UE, Log,
+		TEXT("Link4UE: Settings applied — tempo=%.1f, connect=%s, audio=%s, peer='%s'"),
 		Settings->DefaultTempo,
 		Settings->bAutoConnect ? TEXT("on") : TEXT("off"),
 		Settings->bEnableLinkAudio ? TEXT("on") : TEXT("off"),
@@ -769,7 +715,7 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 	{
 		bSendRoutesPending = true;
 		UE_LOG(LogLink4UE, Warning,
-			TEXT("Link4UE: AudioDevice not available — send routes deferred"));
+			TEXT("Link4UE: Audio device not ready, send routes deferred"));
 		return;
 	}
 
@@ -788,7 +734,8 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		LinkInstance->MasterSend.Bridge = Bridge;
 		LinkInstance->MasterSend.Submix = &MasterSubmix;
 
-		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Master send created [%s] → Sink '%s'"),
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: Master send created — Submix '%s' -> Sink '%s'"),
 			*MasterSubmix.GetName(), *MasterChannelName);
 	}
 
@@ -852,8 +799,9 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 				bFound = true;
 
 				// In-place rename — preserves Sink identity (ChannelId) so peers stay connected
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route renamed [%s] '%s' → '%s'"),
-					*Desired[Di].Submix->GetName(), *Send.ChannelName, *Desired[Di].ChannelName);
+				UE_LOG(LogLink4UE, Log,
+					TEXT("Link4UE: Send renamed — '%s' -> '%s' (Submix '%s')"),
+					*Send.ChannelName, *Desired[Di].ChannelName, *Desired[Di].Submix->GetName());
 				Send.Bridge->SetChannelName(Desired[Di].ChannelName);
 				Send.ChannelName = Desired[Di].ChannelName;
 				break;
@@ -876,9 +824,10 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 				AudioDevice->UnregisterSubmixBufferListener(
 					Send.Bridge.ToSharedRef(), *Send.Submix.Get());
 			}
-			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route removed [%s] '%s'"),
-				Send.Submix.IsValid() ? *Send.Submix->GetName() : TEXT("?"),
-				*Send.ChannelName);
+			UE_LOG(LogLink4UE, Log,
+				TEXT("Link4UE: Send removed — '%s' (Submix '%s')"),
+				*Send.ChannelName,
+				Send.Submix.IsValid() ? *Send.Submix->GetName() : TEXT("?"));
 			LinkInstance->ActiveSends.RemoveAt(i);
 		}
 	}
@@ -899,7 +848,8 @@ void ULink4UESubsystem::RebuildAudioSends(const ULink4UESettings* Settings)
 		ActiveSend.Submix = D.Submix;
 		ActiveSend.ChannelName = D.ChannelName;
 
-		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Send route created [%s] → Sink '%s'"),
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: Send created — Submix '%s' -> Sink '%s'"),
 			*D.Submix->GetName(), *D.ChannelName);
 	}
 
@@ -925,7 +875,7 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 	{
 		bReceiveRoutesPending = true;
 		UE_LOG(LogLink4UE, Warning,
-			TEXT("Link4UE: AudioDevice not available — receive routes deferred"));
+			TEXT("Link4UE: Audio device not ready, receive routes deferred"));
 		return;
 	}
 
@@ -976,7 +926,7 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 		if (!Found)
 		{
 			UE_LOG(LogLink4UE, Log,
-				TEXT("Link4UE: AudioReceive skipped — channel '%s' (id=%s) not online"),
+				TEXT("Link4UE: Receive skipped — channel '%s' not online (id=%s)"),
 				*RecvDef.ChannelName, *RecvDef.ChannelId);
 			continue;
 		}
@@ -997,7 +947,8 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 		const FString& IdHex = LinkInstance->ActiveReceives[i]->GetChannelIdHex();
 		if (!DesiredMap.Contains(IdHex))
 		{
-			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: ReceiveBridge '%s' (id=%s) removed"),
+			UE_LOG(LogLink4UE, Log,
+				TEXT("Link4UE: Receive bridge removed — '%s' (id=%s)"),
 				*LinkInstance->ActiveReceives[i]->GetChannelName(), *IdHex);
 			LinkInstance->ActiveReceives.RemoveAt(i);
 		}
@@ -1031,8 +982,9 @@ void ULink4UESubsystem::RebuildAudioReceives(const ULink4UESettings* Settings)
 			// Update display name if it changed (peer renamed channel)
 			if (Bridge->GetChannelName() != DC.Name)
 			{
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: ReceiveBridge id=%s name updated '%s' → '%s'"),
-					*IdHex, *Bridge->GetChannelName(), *DC.Name);
+				UE_LOG(LogLink4UE, Log,
+					TEXT("Link4UE: Receive bridge renamed — '%s' -> '%s' (id=%s)"),
+					*Bridge->GetChannelName(), *DC.Name, *IdHex);
 				Bridge->SetChannelName(DC.Name);
 			}
 		}
@@ -1117,8 +1069,8 @@ void ULink4UESubsystem::SyncChannelNames()
 				if (Recv.ChannelName != CurrentName)
 				{
 					UE_LOG(LogLink4UE, Log,
-						TEXT("Link4UE: SyncChannelNames id=%s '%s' → '%s'"),
-						*Recv.ChannelId, *Recv.ChannelName, *CurrentName);
+						TEXT("Link4UE: Channel name synced — '%s' -> '%s' (id=%s)"),
+						*Recv.ChannelName, *CurrentName, *Recv.ChannelId);
 					Recv.ChannelName = CurrentName;
 					bAnyChanged = true;
 				}
@@ -1222,7 +1174,7 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 		LinkInstance->LogChannelDiff();
 		if (!bIsRebuilding)
 		{
-			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Channels changed — rebuilding receive routes"));
+			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Channels changed, rebuilding receive routes"));
 			bIsRebuilding = true;
 			SyncChannelNames();
 			RebuildAudioReceives(GetDefault<ULink4UESettings>());
@@ -1242,21 +1194,18 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 			bIsRebuilding = true;
 			if (bSendRoutesPending)
 			{
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: AudioDevice now available — retrying deferred send routes"));
+				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred send routes"));
 				RebuildAudioSends(Settings);
 			}
 			if (bReceiveRoutesPending)
 			{
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: AudioDevice now available — retrying deferred receive routes"));
+				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred receive routes"));
 				RebuildAudioReceives(Settings);
 			}
 			bIsRebuilding = false;
 			bChannelsDirty.store(false, std::memory_order_relaxed);
 		}
 	}
-
-	// Periodic health check for receive diagnostics
-	LinkInstance->HealthCheckTick(DeltaTime);
 
 	return true; // keep ticking
 }
@@ -1338,7 +1287,7 @@ void ULink4UESubsystem::EnableLink()
 	if (LinkInstance)
 	{
 		LinkInstance->Link.enable(true);
-		UE_LOG(LogLink4UE, Log, TEXT("Link enabled"));
+		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link enabled"));
 	}
 }
 
@@ -1347,7 +1296,7 @@ void ULink4UESubsystem::DisableLink()
 	if (LinkInstance)
 	{
 		LinkInstance->Link.enable(false);
-		UE_LOG(LogLink4UE, Log, TEXT("Link disabled"));
+		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link disabled"));
 	}
 }
 
@@ -1378,7 +1327,7 @@ void ULink4UESubsystem::EnableLinkAudio(bool bEnable)
 	if (LinkInstance)
 	{
 		LinkInstance->Link.enableLinkAudio(bEnable);
-		UE_LOG(LogLink4UE, Log, TEXT("Link Audio %s"), bEnable ? TEXT("enabled") : TEXT("disabled"));
+		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link Audio %s"), bEnable ? TEXT("enabled") : TEXT("disabled"));
 	}
 }
 
