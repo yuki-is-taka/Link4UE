@@ -73,6 +73,7 @@ class LINK4UE_API ULink4UESettings : public UDeveloperSettings
 	GENERATED_BODY()
 
 public:
+	virtual FName GetContainerName() const override { return TEXT("Project"); }
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 
 #if WITH_EDITOR
