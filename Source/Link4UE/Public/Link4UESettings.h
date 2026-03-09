@@ -67,7 +67,7 @@ struct LINK4UE_API FLink4UEAudioReceive
 
 DECLARE_MULTICAST_DELEGATE_OneParam(FLink4UEOnSettingsChanged, FName /*PropertyName*/);
 
-UCLASS(Config = Link4UE, meta = (DisplayName = "Link4UE"))
+UCLASS(Config = EditorPerProjectUserSettings, meta = (DisplayName = "Link4UE"))
 class LINK4UE_API ULink4UESettings : public UDeveloperSettings
 {
 	GENERATED_BODY()

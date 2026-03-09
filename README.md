@@ -43,7 +43,7 @@ The `--recursive` flag is required because Ableton Link itself contains a submod
 
 Open **Project Settings > Plugins > Link4UE**.
 
-Settings are stored locally in `Saved/Config/{Platform}/Link4UE.ini` (not version-controlled).
+Settings are stored locally in `Saved/Config/{Platform}/EditorPerProjectUserSettings.ini` (not version-controlled).
 
 ### Connection
 
