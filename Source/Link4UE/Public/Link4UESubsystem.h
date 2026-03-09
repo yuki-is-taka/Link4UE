@@ -215,6 +215,11 @@ public:
 	FLink4UEOnChannelsChanged OnChannelsChanged;
 
 private:
+	/** Notify the property system that a Config property was changed programmatically.
+	 *  In editor: fires PostEditChangeProperty → side effects + UI refresh.
+	 *  In shipping: no-op (side effects are applied inline by the caller). */
+	void NotifyPropertyChanged(FName PropertyName);
+
 	/** Apply all settings to the Link instance. */
 	void ApplySettings();
 

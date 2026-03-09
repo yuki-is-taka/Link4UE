@@ -1089,6 +1089,30 @@ void ULink4UESubsystem::SyncChannelNames()
 	}
 }
 
+void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName)
+{
+#if WITH_EDITOR
+	FProperty* Prop = GetClass()->FindPropertyByName(PropertyName);
+	if (Prop)
+	{
+		FPropertyChangedEvent Event(Prop, EPropertyChangeType::ValueSet);
+		PostEditChangeProperty(Event);
+	}
+#else
+	// Shipping build — apply side effects directly (no PostEditChangeProperty override)
+	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio))
+	{
+		ApplySettings();
+	}
+	else if (LinkInstance)
+	{
+		LinkInstance->Link.enableStartStopSync(bStartStopSync);
+		LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+		LinkInstance->Link.enable(bAutoConnect);
+	}
+#endif
+}
+
 #if WITH_EDITOR
 void ULink4UESubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent)
 {
@@ -1303,20 +1327,18 @@ void ULink4UESubsystem::RequestBeatAtTime(double Beat)
 
 void ULink4UESubsystem::EnableLink()
 {
-	if (LinkInstance)
-	{
-		LinkInstance->Link.enable(true);
-		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link enabled"));
-	}
+	if (!LinkInstance) return;
+	bAutoConnect = true;
+	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bAutoConnect));
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link enabled"));
 }
 
 void ULink4UESubsystem::DisableLink()
 {
-	if (LinkInstance)
-	{
-		LinkInstance->Link.enable(false);
-		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link disabled"));
-	}
+	if (!LinkInstance) return;
+	bAutoConnect = false;
+	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bAutoConnect));
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link disabled"));
 }
 
 bool ULink4UESubsystem::IsLinkEnabled() const
@@ -1326,10 +1348,9 @@ bool ULink4UESubsystem::IsLinkEnabled() const
 
 void ULink4UESubsystem::EnableStartStopSync(bool bEnable)
 {
-	if (LinkInstance)
-	{
-		LinkInstance->Link.enableStartStopSync(bEnable);
-	}
+	if (!LinkInstance) return;
+	bStartStopSync = bEnable;
+	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bStartStopSync));
 }
 
 bool ULink4UESubsystem::IsStartStopSyncEnabled() const
@@ -1343,11 +1364,10 @@ bool ULink4UESubsystem::IsStartStopSyncEnabled() const
 
 void ULink4UESubsystem::EnableLinkAudio(bool bEnable)
 {
-	if (LinkInstance)
-	{
-		LinkInstance->Link.enableLinkAudio(bEnable);
-		UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link Audio %s"), bEnable ? TEXT("enabled") : TEXT("disabled"));
-	}
+	if (!LinkInstance) return;
+	bEnableLinkAudio = bEnable;
+	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio));
+	UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Link Audio %s"), bEnable ? TEXT("enabled") : TEXT("disabled"));
 }
 
 bool ULink4UESubsystem::IsLinkAudioEnabled() const
@@ -1357,10 +1377,9 @@ bool ULink4UESubsystem::IsLinkAudioEnabled() const
 
 void ULink4UESubsystem::SetPeerName(const FString& InPeerName)
 {
-	if (LinkInstance)
-	{
-		LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*InPeerName));
-	}
+	if (!LinkInstance) return;
+	PeerName = InPeerName;
+	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, PeerName));
 }
 
 TArray<FLink4UEChannel> ULink4UESubsystem::GetChannels() const
