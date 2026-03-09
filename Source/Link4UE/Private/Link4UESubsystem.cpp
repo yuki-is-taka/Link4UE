@@ -547,12 +547,6 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
 
-	// Read config properties (loaded from INI by UObject::LoadConfig)
-	const double QuantumBeats = Link4UEQuantumToBeats(DefaultQuantum);
-	Snapshot.Tempo = DefaultTempo;
-	Snapshot.Quantum = QuantumBeats;
-	Quantum.store(QuantumBeats, std::memory_order_relaxed);
-
 	LinkInstance = new FLinkInstance(DefaultTempo,
 		TCHAR_TO_UTF8(*PeerName));
 
@@ -1124,7 +1118,22 @@ void ULink4UESubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyCh
 		return;
 	}
 
-	ApplySettings();
+	// bEnableLinkAudio toggles audio routes on/off — full rebuild needed
+	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio))
+	{
+		ApplySettings();
+		return;
+	}
+
+	// Connection & defaults — update Link state without rebuilding audio routes
+	LinkInstance->Link.enableStartStopSync(bStartStopSync);
+	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+	LinkInstance->Link.enable(bAutoConnect);
+
+	const double Q = Link4UEQuantumToBeats(DefaultQuantum);
+	Quantum.store(Q, std::memory_order_relaxed);
+
+	SetTempo(DefaultTempo);
 }
 #endif
 
