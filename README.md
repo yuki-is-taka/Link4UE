@@ -47,19 +47,19 @@ Settings are stored locally in `Saved/Config/{Platform}/Link4UE.ini` (not versio
 
 ### Connection
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Auto Connect | `true` | Join the Link network on engine startup |
-| Start/Stop Sync | `true` | Synchronize transport state with other peers |
-| Enable Link Audio | `false` | Enable Link Audio channel streaming |
-| Peer Name | `Unreal` | Display name advertised to other peers |
+| Setting | Description |
+|---------|-------------|
+| Auto Connect | Join the Link network on engine startup |
+| Start/Stop Sync | Synchronize transport state with other peers |
+| Enable Link Audio | Enable Link Audio channel streaming |
+| Peer Name | Display name advertised to other peers |
 
 ### Defaults
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Default Tempo | `120.0` | Initial BPM for the session (shared once peers connect) |
-| Default Quantum | `1 Bar` | Phase synchronization unit (matches Ableton Live's global quantize options) |
+| Setting | Description |
+|---------|-------------|
+| Default Tempo | Initial BPM for the session (shared once peers connect) |
+| Default Quantum | Phase synchronization unit (matches Ableton Live's global quantize options) |
 
 ### Audio Routing
 
@@ -165,6 +165,16 @@ Multiple receives can reference the same remote channel with different target Su
 |---------------------|-------------|
 | `GetChannels()` | Returns all currently visible remote channels, each with ChannelId, Name, PeerId, and PeerName |
 | `OnChannelsChanged` | Fires when a channel appears, disappears, or is renamed |
+
+### Latency Tip
+
+UE's audio callback buffer size defaults to 1024 frames. Lowering this reduces Link Audio latency at the cost of higher CPU usage. The Project Settings UI clamps to 512–4096, but you can go as low as 240 by editing the platform ini directly:
+
+```ini
+; e.g. Config/Mac/MacEngine.ini
+[/Script/MacTargetPlatform.MacTargetSettings]
+AudioCallbackBufferFrameSize=256
+```
 
 ### Runtime Controls
 
