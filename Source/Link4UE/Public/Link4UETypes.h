@@ -34,6 +34,10 @@ struct LINK4UE_API FLink4UEAudioSend
 {
 	GENERATED_BODY()
 
+	/** Unique route identifier, auto-generated on creation. */
+	UPROPERTY(Config, VisibleAnywhere, BlueprintReadOnly, Category = "Link4UE")
+	FGuid RouteId;
+
 	/** Source Submix to capture audio from. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	TSoftObjectPtr<USoundSubmix> Submix;

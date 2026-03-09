@@ -190,6 +190,38 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
 	TArray<FLink4UEChannel> GetChannels() const;
 
+	// --- Audio Send Mutators ---
+
+	/** Add a send route (Submix → LinkAudio channel).
+	 *  Returns the RouteId for later removal, or an invalid FGuid on failure. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	FGuid AddAudioSend(USoundSubmix* Submix, const FString& ChannelNamePrefix = TEXT(""));
+
+	/** Remove a send route by RouteId. Returns true if found and removed. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	bool RemoveAudioSend(const FGuid& RouteId);
+
+	/** Remove all send routes. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	void ClearAudioSends();
+
+	// --- Audio Receive Mutators ---
+
+	/** Add a receive route (LinkAudio channel → Submix).
+	 *  ChannelId must not be empty. ChannelName is auto-resolved from the live session.
+	 *  Returns true on success. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	bool AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix = nullptr);
+
+	/** Remove all receive routes for the given ChannelId.
+	 *  Returns true if any entries were removed. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	bool RemoveAudioReceive(const FString& ChannelId);
+
+	/** Remove all receive routes. */
+	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
+	void ClearAudioReceives();
+
 	// --- Delegates ---
 
 	UPROPERTY(BlueprintAssignable, Category = "Link4UE")
@@ -218,7 +250,8 @@ private:
 	/** Notify the property system that a Config property was changed programmatically.
 	 *  In editor: fires PostEditChangeProperty → side effects + UI refresh.
 	 *  In shipping: no-op (side effects are applied inline by the caller). */
-	void NotifyPropertyChanged(FName PropertyName);
+	void NotifyPropertyChanged(FName PropertyName,
+		EPropertyChangeType::Type ChangeType = EPropertyChangeType::ValueSet);
 
 	/** Apply all settings to the Link instance. */
 	void ApplySettings();

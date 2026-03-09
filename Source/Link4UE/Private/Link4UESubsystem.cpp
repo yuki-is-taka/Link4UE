@@ -677,10 +677,12 @@ void ULink4UESubsystem::ApplySettings()
 		return;
 	}
 
-	LinkInstance->Link.enableStartStopSync(bStartStopSync);
-	LinkInstance->Link.enableLinkAudio(bEnableLinkAudio);
-	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+	// enable() must come before enableLinkAudio() — the SDK requires
+	// mEnabled == true for Link Audio to activate.
 	LinkInstance->Link.enable(bAutoConnect);
+	LinkInstance->Link.enableStartStopSync(bStartStopSync);
+	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+	LinkInstance->Link.enableLinkAudio(bEnableLinkAudio);
 
 	const double Q = Link4UEQuantumToBeats(DefaultQuantum);
 	Quantum.store(Q, std::memory_order_relaxed);
@@ -1089,13 +1091,14 @@ void ULink4UESubsystem::SyncChannelNames()
 	}
 }
 
-void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName)
+void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName,
+	EPropertyChangeType::Type ChangeType)
 {
 #if WITH_EDITOR
 	FProperty* Prop = GetClass()->FindPropertyByName(PropertyName);
 	if (Prop)
 	{
-		FPropertyChangedEvent Event(Prop, EPropertyChangeType::ValueSet);
+		FPropertyChangedEvent Event(Prop, ChangeType);
 		PostEditChangeProperty(Event);
 	}
 #else
@@ -1103,6 +1106,20 @@ void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName)
 	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio))
 	{
 		ApplySettings();
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends))
+	{
+		bIsRebuilding = true;
+		RebuildAudioSends();
+		bIsRebuilding = false;
+		bChannelsDirty.store(false, std::memory_order_relaxed);
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioReceives))
+	{
+		bIsRebuilding = true;
+		RebuildAudioReceives();
+		bIsRebuilding = false;
+		bChannelsDirty.store(false, std::memory_order_relaxed);
 	}
 	else if (LinkInstance)
 	{
@@ -1127,6 +1144,14 @@ void ULink4UESubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyCh
 
 	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends))
 	{
+		// Ensure all sends have a RouteId (editor UI creates entries without one)
+		for (FLink4UEAudioSend& Send : AudioSends)
+		{
+			if (!Send.RouteId.IsValid())
+			{
+				Send.RouteId = FGuid::NewGuid();
+			}
+		}
 		bIsRebuilding = true;
 		RebuildAudioSends();
 		bIsRebuilding = false;
@@ -1381,6 +1406,139 @@ void ULink4UESubsystem::SetPeerName(const FString& InPeerName)
 	PeerName = InPeerName;
 	NotifyPropertyChanged(GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, PeerName));
 }
+
+// ---------------------------------------------------------------------------
+// Audio Send Mutators
+// ---------------------------------------------------------------------------
+
+FGuid ULink4UESubsystem::AddAudioSend(USoundSubmix* Submix, const FString& ChannelNamePrefix)
+{
+	FLink4UEAudioSend Send;
+	Send.RouteId = FGuid::NewGuid();
+	Send.Submix = Submix;
+	Send.ChannelNamePrefix = ChannelNamePrefix;
+
+	AudioSends.Add(MoveTemp(Send));
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends),
+		EPropertyChangeType::ArrayAdd);
+
+	return AudioSends.Last().RouteId;
+}
+
+bool ULink4UESubsystem::RemoveAudioSend(const FGuid& RouteId)
+{
+	if (!RouteId.IsValid())
+	{
+		return false;
+	}
+
+	const int32 Idx = AudioSends.IndexOfByPredicate(
+		[&RouteId](const FLink4UEAudioSend& S) { return S.RouteId == RouteId; });
+
+	if (Idx == INDEX_NONE)
+	{
+		return false;
+	}
+
+	AudioSends.RemoveAt(Idx);
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends),
+		EPropertyChangeType::ArrayRemove);
+
+	return true;
+}
+
+void ULink4UESubsystem::ClearAudioSends()
+{
+	if (AudioSends.IsEmpty())
+	{
+		return;
+	}
+
+	AudioSends.Empty();
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends),
+		EPropertyChangeType::ArrayClear);
+}
+
+// ---------------------------------------------------------------------------
+// Audio Receive Mutators
+// ---------------------------------------------------------------------------
+
+bool ULink4UESubsystem::AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix)
+{
+	if (ChannelId.IsEmpty())
+	{
+		return false;
+	}
+
+	// Resolve ChannelName from live session
+	FString ChannelName;
+	if (LinkInstance)
+	{
+		for (const auto& Ch : LinkInstance->Link.channels())
+		{
+			if (NodeIdToHex(Ch.id) == ChannelId)
+			{
+				ChannelName = UTF8_TO_TCHAR(Ch.name.c_str());
+				break;
+			}
+		}
+	}
+
+	FLink4UEAudioReceive Recv;
+	Recv.ChannelId = ChannelId;
+	Recv.ChannelName = ChannelName;
+	Recv.Submix = Submix;
+
+	AudioReceives.Add(MoveTemp(Recv));
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioReceives),
+		EPropertyChangeType::ArrayAdd);
+
+	return true;
+}
+
+bool ULink4UESubsystem::RemoveAudioReceive(const FString& ChannelId)
+{
+	if (ChannelId.IsEmpty())
+	{
+		return false;
+	}
+
+	const int32 CountBefore = AudioReceives.Num();
+	AudioReceives.RemoveAll(
+		[&ChannelId](const FLink4UEAudioReceive& R) { return R.ChannelId == ChannelId; });
+
+	if (AudioReceives.Num() == CountBefore)
+	{
+		return false;
+	}
+
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioReceives),
+		EPropertyChangeType::ArrayRemove);
+
+	return true;
+}
+
+void ULink4UESubsystem::ClearAudioReceives()
+{
+	if (AudioReceives.IsEmpty())
+	{
+		return;
+	}
+
+	AudioReceives.Empty();
+	NotifyPropertyChanged(
+		GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioReceives),
+		EPropertyChangeType::ArrayClear);
+}
+
+// ---------------------------------------------------------------------------
+// Channel Query
+// ---------------------------------------------------------------------------
 
 TArray<FLink4UEChannel> ULink4UESubsystem::GetChannels() const
 {
