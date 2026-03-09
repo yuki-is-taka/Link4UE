@@ -21,7 +21,7 @@ Synchronizes musical beat, tempo, phase, and audio streams across multiple appli
 
 ## Supported Platforms
 
-| Platform | Status |
+| Platform | UE 5.7 |
 |----------|--------|
 | macOS    | Builds |
 | Windows  | Builds |
