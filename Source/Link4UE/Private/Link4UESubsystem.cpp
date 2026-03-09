@@ -174,7 +174,7 @@ public:
 	{
 		UE_LOG(LogLink4UE, Log,
 			TEXT("Link4UE: ReceiveBridge constructed for '%s' (id=%s, deviceRate=%d)"),
-			*ChannelName, *ChannelIdHex, DeviceSampleRate);
+			*ChannelName, *ChannelIdHex, InDeviceSampleRate);
 	}
 
 	~FLink4UEReceiveBridge()
@@ -196,13 +196,61 @@ public:
 		}
 	}
 
+	/** Update the device sample rate when UE's AudioDevice is recreated.
+	 *  Flushes stale samples, updates ProceduralSound metadata, and re-registers
+	 *  ActiveSounds with the new AudioDevice. LinkAudioSource is untouched —
+	 *  no Link channel disruption. */
+	void UpdateDeviceSampleRate(int32 NewRate, FAudioDevice* AudioDevice)
+	{
+		const int32 OldRate = DeviceSampleRate.exchange(NewRate, std::memory_order_relaxed);
+		if (OldRate == NewRate)
+		{
+			return;
+		}
+
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE: ReceiveBridge '%s' sample rate updated %d → %d"),
+			*ChannelName, OldRate, NewRate);
+
+		for (FOutput& Out : Outputs)
+		{
+			if (!Out.ProceduralSound.IsValid())
+			{
+				continue;
+			}
+
+			// Flush samples resampled at the old rate
+			Out.ProceduralSound->ResetAudio();
+			Out.ProceduralSound->SetSampleRate(NewRate);
+
+			// Re-register FActiveSound with the new AudioDevice
+			// (the old device's ActiveSounds were destroyed with it)
+			FActiveSound NewActiveSound;
+			NewActiveSound.SetSound(Out.ProceduralSound.Get());
+			NewActiveSound.SetWorld(nullptr);
+			NewActiveSound.bAllowSpatialization = false;
+			NewActiveSound.bIsUISound = true;
+			NewActiveSound.bLocationDefined = false;
+
+			if (Out.TargetSubmix.IsValid())
+			{
+				FSoundSubmixSendInfo SubmixSend;
+				SubmixSend.SoundSubmix = Out.TargetSubmix.Get();
+				SubmixSend.SendLevel = 1.0f;
+				NewActiveSound.SetSubmixSend(SubmixSend);
+			}
+
+			AudioDevice->AddNewActiveSound(NewActiveSound);
+		}
+	}
+
 	void AddOutput(USoundSubmix* InTargetSubmix, FAudioDevice* AudioDevice)
 	{
 		FOutput& Out = Outputs.AddDefaulted_GetRef();
 		Out.TargetSubmix = InTargetSubmix;
 
 		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>();
-		Wave->SetSampleRate(DeviceSampleRate);
+		Wave->SetSampleRate(DeviceSampleRate.load(std::memory_order_relaxed));
 		Wave->NumChannels = 2; // Link Audio is stereo in practice
 		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
 		Wave->SoundGroup = SOUNDGROUP_Default;
@@ -288,7 +336,9 @@ private:
 		const uint8* AudioData;
 		int32 AudioBytes;
 
-		if (SrcRate == DeviceSampleRate)
+		const int32 DstRate = DeviceSampleRate.load(std::memory_order_relaxed);
+
+		if (SrcRate == DstRate)
 		{
 			// No resampling needed — pass int16 data directly
 			AudioData = reinterpret_cast<const uint8*>(Handle.samples);
@@ -297,7 +347,7 @@ private:
 		else
 		{
 			// Linear interpolation resampling (#1)
-			const double Ratio = static_cast<double>(SrcRate) / static_cast<double>(DeviceSampleRate);
+			const double Ratio = static_cast<double>(SrcRate) / static_cast<double>(DstRate);
 			const int32 DstFrames = static_cast<int32>(SrcFrames / Ratio);
 			ResampleBuffer.SetNumUninitialized(DstFrames * SrcChannels, EAllowShrinking::No);
 
@@ -333,7 +383,7 @@ private:
 
 	TArray<FOutput> Outputs;
 	FString ChannelIdHex;
-	int32 DeviceSampleRate;
+	std::atomic<int32> DeviceSampleRate;
 	FString ChannelName;
 	double CreationTime;
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
@@ -636,14 +686,33 @@ void ULink4UESubsystem::Deinitialize()
 
 void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
 {
-	// Only rebuild if sends are actually pending — this callback can fire multiple times
-	if (!bSendRoutesPending)
+	if (!LinkInstance)
 	{
 		return;
 	}
+
+	FAudioDevice* AudioDevice = GetMainAudioDevice();
+	if (!AudioDevice)
+	{
+		return;
+	}
+
 	UE_LOG(LogLink4UE, Log,
-		TEXT("Link4UE: OnAudioDeviceCreated (id=%u) — rebuilding deferred send routes"), DeviceId);
-	RebuildAudioSends(GetDefault<ULink4UESettings>());
+		TEXT("Link4UE: OnAudioDeviceCreated (id=%u)"), DeviceId);
+
+	// Rebuild send routes (re-registers SubmixBufferListeners with new device)
+	if (bSendRoutesPending)
+	{
+		RebuildAudioSends(GetDefault<ULink4UESettings>());
+	}
+
+	// Update receive bridges in-place — no LinkAudioSource destruction,
+	// so Link channels stay connected without interruption.
+	const int32 NewRate = AudioDevice->GetSampleRate();
+	for (auto& Recv : LinkInstance->ActiveReceives)
+	{
+		Recv->UpdateDeviceSampleRate(NewRate, AudioDevice);
+	}
 }
 
 // ---------------------------------------------------------------------------
