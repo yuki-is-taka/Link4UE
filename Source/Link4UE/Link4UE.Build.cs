@@ -10,7 +10,6 @@ public class Link4UE : ModuleRules
 			new string[]
 			{
 				"Core",
-				"DeveloperSettings",
 				"Engine",
 				"LinkLibrary",
 			}
