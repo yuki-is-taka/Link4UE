@@ -267,6 +267,11 @@ public:
 		{
 			CreateProceduralSound(Out, NewDevice);
 		}
+
+		// Discard the first Source callback after switch — it contains data
+		// that accumulated while OutputsLock was held during the transition.
+		// Without this, that stale data becomes initial playback latency.
+		bFlushNextCallback.store(true, std::memory_order_release);
 	}
 
 	int32 GetNumOutputs() const { return Outputs.Num(); }
@@ -385,6 +390,13 @@ private:
 
 	void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle)
 	{
+		// After a device switch, discard the first callback to avoid
+		// queuing stale data that accumulated during the transition.
+		if (bFlushNextCallback.exchange(false, std::memory_order_acquire))
+		{
+			return;
+		}
+
 		const int32 SrcRate = static_cast<int32>(Handle.info.sampleRate);
 		const int32 SrcFrames = static_cast<int32>(Handle.info.numFrames);
 		const int32 SrcChannels = static_cast<int32>(Handle.info.numChannels);
@@ -496,6 +508,7 @@ private:
 					MonoFrames * sizeof(int16));
 			}
 		}
+
 	}
 
 	Audio::FDeviceId ActiveDeviceId = INDEX_NONE;
@@ -504,6 +517,7 @@ private:
 	FString ChannelIdHex;
 	std::atomic<int32> DeviceSampleRate;
 	FString ChannelName;
+	std::atomic<bool> bFlushNextCallback{false};
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
