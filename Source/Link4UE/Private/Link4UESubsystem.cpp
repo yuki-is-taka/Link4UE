@@ -428,6 +428,16 @@ private:
 		{
 			if (Out.ProceduralSound.IsValid())
 			{
+				// Overrun protection: if queued data exceeds the threshold,
+				// reset the buffer to prevent unbounded latency accumulation.
+				// This causes a click but is preferable to growing delay.
+				if (Out.ProceduralSound->GetAvailableAudioByteCount() > OverrunThresholdBytes)
+				{
+					Out.ProceduralSound->ResetAudio();
+					UE_LOG(LogLink4UE, Warning,
+						TEXT("Link4UE [RECV] '%s': overrun detected (%d bytes queued, threshold=%d) — reset"),
+						*ChannelName, Out.ProceduralSound->GetAvailableAudioByteCount(), OverrunThresholdBytes);
+				}
 				Out.ProceduralSound->QueueAudio(AudioData, AudioBytes);
 			}
 		}
@@ -442,6 +452,11 @@ private:
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
+
+	// Overrun threshold: 3 callback buffers worth of stereo int16 data.
+	// Mac CoreAudio = 1024 frames; other platforms may be smaller but 1024 is a safe upper bound.
+	// 1024 frames × 2 ch × 2 bytes × 3 = 12288 bytes
+	static constexpr int32 OverrunThresholdBytes = 1024 * 2 * sizeof(int16) * 3;
 
 };
 
