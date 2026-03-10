@@ -202,6 +202,8 @@ UE's audio callback buffer size defaults to 1024 frames. Lowering this reduces L
 AudioCallbackBufferFrameSize=256
 ```
 
+> **macOS caveat:** The CoreAudio backend in UE hardcodes the audio callback buffer size to **1024 frames** regardless of `AudioCallbackBufferFrameSize`. This means on Mac the minimum achievable audio callback latency is ~21.3 ms at 48 kHz, compared to ~5.3 ms (256 frames) on Windows/iOS where the setting is respected. This is an engine limitation, not a Link4UE issue.
+
 ### Runtime Controls
 
 | Function | Description |
