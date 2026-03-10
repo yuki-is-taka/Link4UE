@@ -422,6 +422,22 @@ private:
 			AudioBytes = DstFrames * SrcChannels * sizeof(int16);
 		}
 
+		// Mono→stereo: duplicate each sample to L and R (unity gain, DAW convention).
+		// Wave is always 2ch; queuing 1ch data into a 2ch Wave breaks the mixer.
+		if (SrcChannels == 1)
+		{
+			const int16* MonoData = reinterpret_cast<const int16*>(AudioData);
+			const int32 MonoSamples = AudioBytes / sizeof(int16);
+			MonoToStereoBuffer.SetNumUninitialized(MonoSamples * 2, EAllowShrinking::No);
+			for (int32 i = 0; i < MonoSamples; ++i)
+			{
+				MonoToStereoBuffer[i * 2]     = MonoData[i];
+				MonoToStereoBuffer[i * 2 + 1] = MonoData[i];
+			}
+			AudioData = reinterpret_cast<const uint8*>(MonoToStereoBuffer.GetData());
+			AudioBytes = MonoSamples * 2 * sizeof(int16);
+		}
+
 		// Push to all outputs (single device)
 		FScopeLock Lock(&OutputsLock);
 		for (FOutput& Out : Outputs)
@@ -452,6 +468,7 @@ private:
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
+	TArray<int16> MonoToStereoBuffer;
 
 	// Overrun threshold: 3 callback buffers worth of stereo int16 data.
 	// Mac CoreAudio = 1024 frames; other platforms may be smaller but 1024 is a safe upper bound.
