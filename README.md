@@ -11,7 +11,7 @@ Synchronizes musical beat, tempo, phase, and audio streams across multiple appli
 - **Link Audio Receive** — subscribe to remote Link Audio channels and inject audio into UE Submixes
 - **Beat delegates** — `OnBeat` and `OnPhaseZero` events fired on GameThread for gameplay synchronization
 - **Channel discovery** — `GetChannels()` and `OnChannelsChanged` for listing available audio channels
-- **Editor settings** — `UDeveloperSettings` with hot-reload; audio routing configured via Project Settings
+- **Editor settings** — Engine Subsystem with Config persistence; audio routing configured via Project Settings
 - **Blueprint API** — all Link controls (tempo, quantum, transport, audio routing) exposed as `BlueprintCallable`
 
 ## Requirements
@@ -43,7 +43,7 @@ The `--recursive` flag is required because Ableton Link itself contains a submod
 
 Open **Project Settings > Plugins > Link4UE**.
 
-Settings are stored locally in `Saved/Config/{Platform}/EditorPerProjectUserSettings.ini` (not version-controlled).
+Settings appear in the Project Settings UI but are stored per-user in `Saved/Config/{Platform}/EditorPerProjectUserSettings.ini` (not version-controlled). This means each team member has their own Link4UE configuration — changing settings does not affect other users' setups.
 
 ### Connection
 
@@ -67,6 +67,32 @@ Settings are stored locally in `Saved/Config/{Platform}/EditorPerProjectUserSett
 |---------|-------------|
 | Audio Sends | Submix → Link Audio channel routing |
 | Audio Receives | Link Audio channel → Submix routing |
+
+### Config Persistence
+
+All settings listed above are `UPROPERTY(Config)` and stored in `EditorPerProjectUserSettings.ini`.
+
+| Edit method | Saved to ini? | Editor UI updated? |
+|-------------|---------------|-------------------|
+| **Project Settings UI** (editor) | Immediately | Yes |
+| **Blueprint / C++ mutator** | No — call `SaveConfig()` to persist | Yes (via `PostEditChangeProperty`) |
+
+Blueprint mutators (`EnableLinkAudio`, `SetPeerName`, `EnableStartStopSync`, `AddAudioSend`, `RemoveAudioSend`, `ClearAudioSends`, `AddAudioReceive`, `RemoveAudioReceive`, `ClearAudioReceives`) apply changes immediately at runtime and refresh the editor UI, but **do not write to ini**. If you need changes to survive an editor restart, call `SaveConfig()` on the subsystem after making changes.
+
+The following Config properties are affected:
+
+| Property | Mutator(s) |
+|----------|-----------|
+| `bAutoConnect` | (editor only) |
+| `bStartStopSync` | `EnableStartStopSync(bEnable)` |
+| `bEnableLinkAudio` | `EnableLinkAudio(bEnable)` |
+| `PeerName` | `SetPeerName(Name)` |
+| `DefaultTempo` | (editor only — runtime tempo is set via `SetTempo`) |
+| `DefaultQuantum` | (editor only — runtime quantum is set via `SetQuantum`/`SetQuantumPreset`) |
+| `AudioSends` | `AddAudioSend`, `RemoveAudioSend`, `ClearAudioSends` |
+| `AudioReceives` | `AddAudioReceive`, `RemoveAudioReceive`, `ClearAudioReceives` |
+
+> **Note:** `SetTempo`, `SetQuantum`, `SetQuantumPreset`, `SetIsPlaying`, and `RequestBeatAtTime` are **session-only controls** that modify the live Link state. They do not write to Config properties and are not persisted.
 
 ---
 
