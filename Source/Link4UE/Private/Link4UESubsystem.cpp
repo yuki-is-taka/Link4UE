@@ -298,7 +298,20 @@ private:
 		ActiveDeviceId = INDEX_NONE;
 	}
 
-	/** Create a ProceduralSound + FActiveSound for one output on the given device. */
+	/** Create a ProceduralSound + FActiveSound for one output on the given device.
+	 *
+	 *  NOTE — PlatformAudioHeadroom compensation:
+	 *  UE applies a per-platform headroom scalar to every source's volume
+	 *  (e.g. Mac = -6 dB, Windows = -3 dB) to prevent clipping when many game
+	 *  sounds are summed.  Link4UE acts as an audio pass-through, not a game
+	 *  sound generator, so this headroom would introduce unwanted gain loss.
+	 *  We read the same ini value the engine uses (Audio.PlatformHeadroomDB)
+	 *  and set VolumeMultiplier to its reciprocal to cancel the reduction.
+	 *
+	 *  Caveat: if SetPlatformAudioHeadroom() is called at runtime to change
+	 *  the value after the ProceduralSound has been created, the compensation
+	 *  here will be stale and a gain mismatch will occur.  This is acceptable
+	 *  because runtime headroom changes are extremely rare in practice. */
 	void CreateProceduralSound(FOutput& Out, FAudioDevice* Device)
 	{
 		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(
@@ -318,6 +331,18 @@ private:
 		NewActiveSound.bLocationDefined = false;
 		NewActiveSound.bIgnoreForFlushing = true;
 
+		// Compensate PlatformAudioHeadroom (see note above)
+		float HeadroomLinear = 1.0f;
+		float HeadroomDB = 0.0f;
+		if (GConfig->GetFloat(TEXT("Audio"), TEXT("PlatformHeadroomDB"), HeadroomDB, GEngineIni))
+		{
+			HeadroomLinear = FMath::Pow(10.0f, HeadroomDB / 20.0f);
+		}
+		if (HeadroomLinear > SMALL_NUMBER)
+		{
+			NewActiveSound.SetVolume(1.0f / HeadroomLinear);
+		}
+
 		USoundSubmix* TargetSubmix = Out.TargetSubmix.Get();
 		if (TargetSubmix)
 		{
@@ -331,6 +356,10 @@ private:
 		Out.ProceduralSound.Reset(Wave);
 
 		DeviceSampleRate.store(Rate, std::memory_order_relaxed);
+
+		UE_LOG(LogLink4UE, Log,
+			TEXT("Link4UE CreateProceduralSound: rate=%d, PlatformHeadroomDB=%.1f, VolumeCompensation=%.4f"),
+			Rate, HeadroomDB, (HeadroomLinear > SMALL_NUMBER) ? 1.0f / HeadroomLinear : 1.0f);
 	}
 
 	/** Stop and release a single output's playback. Must be called under OutputsLock. */
@@ -413,6 +442,7 @@ private:
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
+
 };
 
 // ---------------------------------------------------------------------------
