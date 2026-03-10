@@ -161,6 +161,14 @@ When Link Audio is enabled, a **Master Send** is automatically created. This cap
 
 This is required by the Link Audio protocol — without at least one Send, remote peers cannot discover this node and will not transmit audio. The Master Send is always active independently of user-configured sends.
 
+### Channel Format Philosophy
+
+Link4UE follows a simple principle: **send what you have, convert at the receiver**.
+
+The send side always transmits the Submix's native channel count (up to stereo). No format option is exposed — the sender does not discard information. The receive side has a **Channel Format** setting (Mono / Stereo) that determines how incoming audio is consumed within UE. Conversion between formats happens automatically at the Wave boundary.
+
+This mirrors how DAWs handle routing: a send bus outputs its native format, and the return track decides its own channel configuration.
+
 ### Sending Audio (UE → Network)
 
 Add entries to **Audio Sends** in Project Settings:
@@ -170,7 +178,15 @@ Add entries to **Audio Sends** in Project Settings:
 | Submix | The UE Submix to capture. Audio flowing through this Submix is streamed to the network |
 | Channel Name Prefix | Name shown to remote peers. Empty = Submix asset name |
 
-Each entry creates a Link Audio channel that remote peers can subscribe to. Stereo only (Link Audio SDK constraint).
+Each entry creates a Link Audio channel. The channel count is determined dynamically per audio callback from the Submix's actual output:
+
+| Submix channels | Sent as | Notes |
+|-----------------|---------|-------|
+| 1 (mono) | 1ch | Passed through as-is |
+| 2 (stereo) | 2ch | Passed through as-is |
+| 3+ (surround) | 2ch | First 2 channels (L, R) extracted. Not a proper downmix — Center, LFE, surround channels are discarded |
+
+In practice, UE Submixes are almost always stereo. The 3+ channel case is a safety fallback, not a surround downmix feature.
 
 ### Receiving Audio (Network → UE)
 
@@ -179,14 +195,32 @@ Add entries to **Audio Receives** in Project Settings:
 | Field | Description |
 |-------|-------------|
 | Channel | Dropdown of available remote channels. Requires Link Audio enabled and peers connected |
-| Channel Format | Mono or Stereo. Determines the internal Wave's channel count. Incoming audio is converted to match (mono↔stereo) at the Wave boundary |
+| Channel Format | Mono or Stereo. Determines the internal Wave's channel count |
 | Submix | Target Submix for playback. Empty = Master Submix |
 
 Channels are identified by a stable ID internally. If a peer renames a channel (e.g. renaming a track in Ableton Live), the routing stays intact and the display name auto-updates.
 
 Multiple receives can reference the same remote channel with different target Submixes — the audio is shared without duplication overhead.
 
-**Channel Format** works like a DAW track's channel setting: a Mono receive creates a 1-channel source suitable for spatialization, while Stereo creates a 2-channel source for pre-panned audio. If the remote channel's actual format differs, conversion happens automatically — mono sources are duplicated to stereo (unity gain), stereo sources are downmixed to mono ((L+R)/2).
+#### Channel Format
+
+Channel Format works like a DAW track's channel setting. It determines the `USoundWaveProcedural`'s channel count, which is fixed for the lifetime of the Wave.
+
+| Channel Format | Wave channels | Use case |
+|----------------|---------------|----------|
+| **Stereo** (default) | 2 | Pre-panned audio, standard playback |
+| **Mono** | 1 | 3D spatialization via `UAudioComponent` + `SetSound()` |
+
+If the remote channel's actual format differs from the Wave's format, conversion happens automatically per callback:
+
+| Remote → Wave | Conversion |
+|---------------|------------|
+| Stereo → Stereo | Pass-through |
+| Mono → Mono | Pass-through |
+| Mono → Stereo | L = R = mono sample (unity gain, DAW convention) |
+| Stereo → Mono | (L + R) / 2 downmix |
+
+The remote channel's format can change at any time (e.g. if the sender switches from a stereo to a mono Submix). The conversion adapts dynamically per callback without requiring a rebuild.
 
 ### Channel Discovery
 
