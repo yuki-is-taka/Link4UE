@@ -27,7 +27,7 @@ namespace
 		return Out;
 	}
 
-	FAudioDevice* GetMainAudioDevice()
+	FAudioDevice* GetActiveDevice()
 	{
 		if (FAudioDeviceManager* ADM = FAudioDeviceManager::Get())
 		{
@@ -149,15 +149,19 @@ private:
 // ---------------------------------------------------------------------------
 // FLink4UEReceiveBridge — receives LinkAudio Source data and routes to Submix
 //   via USoundWaveProcedural + FActiveSound (no UAudioComponent needed)
+//
+//   Active-device-only design: all outputs play on a single device at a time.
+//   SwitchToDevice() stops the old device's sounds and recreates on the new one.
 // ---------------------------------------------------------------------------
 
 class FLink4UEReceiveBridge
 {
 public:
+	/** Logical output (one per TargetSubmix). */
 	struct FOutput
 	{
-		TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
 		TWeakObjectPtr<USoundSubmix> TargetSubmix; // null = Master, used for diff matching
+		TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
 	};
 
 	FLink4UEReceiveBridge(ableton::LinkAudio& InLink,
@@ -180,124 +184,90 @@ public:
 
 	~FLink4UEReceiveBridge()
 	{
-		// Teardown order (#8):
+		// Teardown order:
 		// 1. Source destructor fires first (member destruction order is reverse)
 		//    → SDK callback stops, no more QueueAudio calls
-		// 2. Stop FActiveSounds via StopSoundsUsingResource
-		//    → GeneratePCMData stops being called
+		// 2. Stop FActiveSounds on the active device
 		// 3. TStrongObjectPtr releases USoundWaveProcedural
-		FAudioDevice* AudioDevice = GetMainAudioDevice();
-		for (FOutput& Out : Outputs)
-		{
-			if (AudioDevice && Out.ProceduralSound.IsValid())
-			{
-				AudioDevice->StopSoundsUsingResource(Out.ProceduralSound.Get());
-			}
-			// TStrongObjectPtr::Reset in destructor releases the UObject
-		}
+		FScopeLock Lock(&OutputsLock);
+		Deactivate();
 	}
 
-	/** Update the device sample rate when UE's AudioDevice is recreated.
-	 *  Flushes stale samples, updates ProceduralSound metadata, and re-registers
-	 *  ActiveSounds with the new AudioDevice. LinkAudioSource is untouched —
-	 *  no Link channel disruption. */
-	void UpdateDeviceSampleRate(int32 NewRate, FAudioDevice* AudioDevice)
+	/** Add a logical output and create playback on the given device. */
+	void AddOutput(USoundSubmix* InTargetSubmix, Audio::FDeviceId DeviceId)
 	{
-		const int32 OldRate = DeviceSampleRate.exchange(NewRate, std::memory_order_relaxed);
-		if (OldRate == NewRate)
-		{
-			return;
-		}
-
-		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: Receive bridge '%s' sample rate changed — %d -> %d"),
-			*ChannelName, OldRate, NewRate);
-
-		for (FOutput& Out : Outputs)
-		{
-			if (!Out.ProceduralSound.IsValid())
-			{
-				continue;
-			}
-
-			// Flush samples resampled at the old rate
-			Out.ProceduralSound->ResetAudio();
-			Out.ProceduralSound->SetSampleRate(NewRate);
-
-			// Re-register FActiveSound with the new AudioDevice
-			// (the old device's ActiveSounds were destroyed with it)
-			FActiveSound NewActiveSound;
-			NewActiveSound.SetSound(Out.ProceduralSound.Get());
-			NewActiveSound.SetWorld(nullptr);
-			NewActiveSound.bAllowSpatialization = false;
-			NewActiveSound.bIsUISound = true;
-			NewActiveSound.bLocationDefined = false;
-
-			if (Out.TargetSubmix.IsValid())
-			{
-				FSoundSubmixSendInfo SubmixSend;
-				SubmixSend.SoundSubmix = Out.TargetSubmix.Get();
-				SubmixSend.SendLevel = 1.0f;
-				NewActiveSound.SetSubmixSend(SubmixSend);
-			}
-
-			AudioDevice->AddNewActiveSound(NewActiveSound);
-		}
-	}
-
-	void AddOutput(USoundSubmix* InTargetSubmix, FAudioDevice* AudioDevice)
-	{
+		FScopeLock Lock(&OutputsLock);
 		FOutput& Out = Outputs.AddDefaulted_GetRef();
 		Out.TargetSubmix = InTargetSubmix;
 
-		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>();
-		Wave->SetSampleRate(DeviceSampleRate.load(std::memory_order_relaxed));
-		Wave->NumChannels = 2; // Link Audio is stereo in practice
-		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
-		Wave->SoundGroup = SOUNDGROUP_Default;
-		Wave->bLooping = true;
-		Out.ProceduralSound.Reset(Wave);
-
-		FActiveSound NewActiveSound;
-		NewActiveSound.SetSound(Wave);
-		NewActiveSound.SetWorld(nullptr);
-		NewActiveSound.bAllowSpatialization = false;
-		NewActiveSound.bIsUISound = true;
-		NewActiveSound.bLocationDefined = false;
-
-		if (InTargetSubmix)
+		if (DeviceId != INDEX_NONE)
 		{
-			FSoundSubmixSendInfo SubmixSend;
-			SubmixSend.SoundSubmix = InTargetSubmix;
-			SubmixSend.SendLevel = 1.0f;
-			NewActiveSound.SetSubmixSend(SubmixSend);
+			CreateProceduralSound(Out, DeviceId);
 		}
-
-		AudioDevice->AddNewActiveSound(NewActiveSound);
+		ActiveDeviceId = DeviceId;
 
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s'"),
+			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s' (device=%u)"),
 			*ChannelName,
-			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("Master"));
+			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("Master"),
+			DeviceId);
 	}
 
-	void RemoveOutput(int32 Index, FAudioDevice* AudioDevice)
+	/** Remove a logical output. */
+	void RemoveOutput(int32 Index)
 	{
 		if (!Outputs.IsValidIndex(Index))
 		{
 			return;
 		}
+		FScopeLock Lock(&OutputsLock);
 		FOutput& Out = Outputs[Index];
-		if (AudioDevice && Out.ProceduralSound.IsValid())
-		{
-			AudioDevice->StopSoundsUsingResource(Out.ProceduralSound.Get());
-		}
 		const FString SubmixName = Out.TargetSubmix.IsValid()
 			? Out.TargetSubmix->GetName() : TEXT("Master");
+		StopOutput(Out);
 		Outputs.RemoveAt(Index);
 		UE_LOG(LogLink4UE, Log,
 			TEXT("Link4UE: Receive output removed — '%s' -> Submix '%s'"),
 			*ChannelName, *SubmixName);
+	}
+
+	/** Stop all outputs and recreate them on the new device. */
+	void SwitchToDevice(Audio::FDeviceId NewDeviceId)
+	{
+		FScopeLock Lock(&OutputsLock);
+		Deactivate();
+		ActiveDeviceId = NewDeviceId;
+		if (NewDeviceId == INDEX_NONE)
+		{
+			return;
+		}
+		for (FOutput& Out : Outputs)
+		{
+			CreateProceduralSound(Out, NewDeviceId);
+		}
+	}
+
+	/** Stop all playback without removing logical outputs. */
+	void Deactivate()
+	{
+		// Can be called with or without OutputsLock held
+		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
+		FAudioDevice* Device = nullptr;
+		if (ADM && ActiveDeviceId != INDEX_NONE)
+		{
+			FAudioDeviceHandle Handle = ADM->GetAudioDevice(ActiveDeviceId);
+			Device = Handle.GetAudioDevice();
+		}
+
+		for (FOutput& Out : Outputs)
+		{
+			if (Device && Out.ProceduralSound.IsValid())
+			{
+				Device->StopSoundsUsingResource(Out.ProceduralSound.Get());
+			}
+			Out.ProceduralSound.Reset();
+		}
+		ActiveDeviceId = INDEX_NONE;
 	}
 
 	int32 GetNumOutputs() const { return Outputs.Num(); }
@@ -311,6 +281,62 @@ public:
 	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
 
 private:
+	/** Create a ProceduralSound + FActiveSound for one output on the given device. */
+	void CreateProceduralSound(FOutput& Out, Audio::FDeviceId DeviceId)
+	{
+		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
+		if (!ADM) return;
+		FAudioDeviceHandle Handle = ADM->GetAudioDevice(DeviceId);
+		FAudioDevice* Device = Handle.GetAudioDevice();
+		if (!Device) return;
+
+		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(
+			GetTransientPackage());
+		Wave->SetSampleRate(Device->GetSampleRate());
+		Wave->NumChannels = 2;
+		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
+		Wave->SoundGroup = SOUNDGROUP_Default;
+		Wave->bLooping = true;
+
+		FActiveSound NewActiveSound;
+		NewActiveSound.SetSound(Wave);
+		NewActiveSound.SetWorld(nullptr);
+		NewActiveSound.bAllowSpatialization = false;
+		NewActiveSound.bIsUISound = true;
+		NewActiveSound.bLocationDefined = false;
+		NewActiveSound.bIgnoreForFlushing = true;
+
+		USoundSubmix* TargetSubmix = Out.TargetSubmix.Get();
+		if (TargetSubmix)
+		{
+			FSoundSubmixSendInfo SubmixSend;
+			SubmixSend.SoundSubmix = TargetSubmix;
+			SubmixSend.SendLevel = 1.0f;
+			NewActiveSound.SetSubmixSend(SubmixSend);
+		}
+
+		Device->AddNewActiveSound(NewActiveSound);
+		Out.ProceduralSound.Reset(Wave);
+
+		DeviceSampleRate.store(Device->GetSampleRate(), std::memory_order_relaxed);
+	}
+
+	/** Stop and release a single output's playback. */
+	void StopOutput(FOutput& Out)
+	{
+		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
+		if (ADM && Out.ProceduralSound.IsValid() && ActiveDeviceId != INDEX_NONE)
+		{
+			FAudioDeviceHandle Handle = ADM->GetAudioDevice(ActiveDeviceId);
+			if (Handle.IsValid())
+			{
+				Handle.GetAudioDevice()->StopSoundsUsingResource(
+					Out.ProceduralSound.Get());
+			}
+		}
+		Out.ProceduralSound.Reset();
+	}
+
 	void OnSourceBuffer(ableton::LinkAudioSource::BufferHandle Handle)
 	{
 		const int32 SrcRate = static_cast<int32>(Handle.info.sampleRate);
@@ -329,13 +355,11 @@ private:
 
 		if (SrcRate == DstRate)
 		{
-			// No resampling needed — pass int16 data directly
 			AudioData = reinterpret_cast<const uint8*>(Handle.samples);
 			AudioBytes = SrcFrames * SrcChannels * sizeof(int16);
 		}
 		else
 		{
-			// Linear interpolation resampling (#1)
 			const double Ratio = static_cast<double>(SrcRate) / static_cast<double>(DstRate);
 			const int32 DstFrames = static_cast<int32>(SrcFrames / Ratio);
 			ResampleBuffer.SetNumUninitialized(DstFrames * SrcChannels, EAllowShrinking::No);
@@ -360,7 +384,8 @@ private:
 			AudioBytes = DstFrames * SrcChannels * sizeof(int16);
 		}
 
-		// Push to all outputs (#7 — one Bridge, multiple outputs)
+		// Push to all outputs (single device)
+		FScopeLock Lock(&OutputsLock);
 		for (FOutput& Out : Outputs)
 		{
 			if (Out.ProceduralSound.IsValid())
@@ -370,7 +395,9 @@ private:
 		}
 	}
 
+	Audio::FDeviceId ActiveDeviceId = INDEX_NONE;
 	TArray<FOutput> Outputs;
+	FCriticalSection OutputsLock;
 	FString ChannelIdHex;
 	std::atomic<int32> DeviceSampleRate;
 	FString ChannelName;
@@ -490,7 +517,7 @@ struct ULink4UESubsystem::FLinkInstance
 
 	void TearDownMasterSend()
 	{
-		FAudioDevice* AudioDevice = GetMainAudioDevice();
+		FAudioDevice* AudioDevice = GetActiveDevice();
 		if (AudioDevice && MasterSend.Bridge.IsValid() && MasterSend.Submix.IsValid())
 		{
 			AudioDevice->UnregisterSubmixBufferListener(
@@ -502,7 +529,7 @@ struct ULink4UESubsystem::FLinkInstance
 
 	void TearDownUserSends()
 	{
-		FAudioDevice* AudioDevice = GetMainAudioDevice();
+		FAudioDevice* AudioDevice = GetActiveDevice();
 		for (auto& Send : ActiveSends)
 		{
 			if (AudioDevice && Send.Bridge.IsValid() && Send.Submix.IsValid())
@@ -585,9 +612,11 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	// Capture initial channel snapshot for diff logging
 	LinkInstance->LogChannelDiff();
 
-	// Listen for AudioDevice creation so we can rebuild routes once the device is ready
+	// Listen for AudioDevice lifecycle events
 	AudioDeviceCreatedHandle = FAudioDeviceManagerDelegates::OnAudioDeviceCreated.AddUObject(
 		this, &ULink4UESubsystem::OnAudioDeviceCreated);
+	AudioDeviceDestroyedHandle = FAudioDeviceManagerDelegates::OnAudioDeviceDestroyed.AddUObject(
+		this, &ULink4UESubsystem::OnAudioDeviceDestroyed);
 
 #if WITH_EDITOR
 	ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
@@ -605,6 +634,7 @@ void ULink4UESubsystem::Initialize(FSubsystemCollectionBase& Collection)
 void ULink4UESubsystem::Deinitialize()
 {
 	FAudioDeviceManagerDelegates::OnAudioDeviceCreated.Remove(AudioDeviceCreatedHandle);
+	FAudioDeviceManagerDelegates::OnAudioDeviceDestroyed.Remove(AudioDeviceDestroyedHandle);
 
 #if WITH_EDITOR
 	ISettingsModule* SettingsModule = FModuleManager::GetModulePtr<ISettingsModule>("Settings");
@@ -642,28 +672,50 @@ void ULink4UESubsystem::OnAudioDeviceCreated(Audio::FDeviceId DeviceId)
 		return;
 	}
 
-	FAudioDevice* AudioDevice = GetMainAudioDevice();
-	if (!AudioDevice)
-	{
-		return;
-	}
-
 	UE_LOG(LogLink4UE, Log,
 		TEXT("Link4UE: Audio device created (id=%u)"), DeviceId);
 
-	// Rebuild send routes (re-registers SubmixBufferListeners with new device)
+	// Rebuild deferred send routes
 	if (bSendRoutesPending)
 	{
 		RebuildAudioSends();
 	}
 
-	// Update receive bridges in-place — no LinkAudioSource destruction,
-	// so Link channels stay connected without interruption.
-	const int32 NewRate = AudioDevice->GetSampleRate();
-	for (auto& Recv : LinkInstance->ActiveReceives)
+	// Rebuild deferred receive routes
+	if (bReceiveRoutesPending)
 	{
-		Recv->UpdateDeviceSampleRate(NewRate, AudioDevice);
+		RebuildAudioReceives();
 	}
+
+	// A new device may become active — check on next Tick
+	bNeedsAudioRecreation = true;
+}
+
+void ULink4UESubsystem::OnAudioDeviceDestroyed(Audio::FDeviceId DeviceId)
+{
+	UE_LOG(LogLink4UE, Log,
+		TEXT("Link4UE: Audio device destroyed (id=%u, activeSends=%d, activeReceives=%d)"),
+		DeviceId,
+		LinkInstance ? LinkInstance->ActiveSends.Num() : 0,
+		LinkInstance ? LinkInstance->ActiveReceives.Num() : 0);
+
+	if (!LinkInstance)
+	{
+		return;
+	}
+
+	// If the destroyed device is our current device, deactivate receive outputs
+	// (device is still alive at broadcast time, so StopSoundsUsingResource is safe)
+	if (DeviceId == CurrentActiveDeviceId)
+	{
+		for (auto& Recv : LinkInstance->ActiveReceives)
+		{
+			Recv->Deactivate();
+		}
+	}
+
+	// Trigger recreation on the (new) active device on next Tick
+	bNeedsAudioRecreation = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -717,7 +769,7 @@ void ULink4UESubsystem::RebuildAudioSends()
 		return;
 	}
 
-	FAudioDevice* AudioDevice = GetMainAudioDevice();
+	FAudioDevice* AudioDevice = GetActiveDevice();
 	if (!AudioDevice)
 	{
 		bSendRoutesPending = true;
@@ -877,14 +929,17 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		return;
 	}
 
-	FAudioDevice* AudioDevice = GetMainAudioDevice();
-	if (!AudioDevice)
+	FAudioDevice* ActiveDevice = GetActiveDevice();
+	if (!ActiveDevice)
 	{
 		bReceiveRoutesPending = true;
 		UE_LOG(LogLink4UE, Warning,
-			TEXT("Link4UE: Audio device not ready, receive routes deferred"));
+			TEXT("Link4UE: No audio device available, receive routes deferred"));
 		return;
 	}
+
+	const Audio::FDeviceId ActiveId = ActiveDevice->DeviceID;
+	CurrentActiveDeviceId = ActiveId;
 
 	const auto AllChannels = LinkInstance->Link.channels();
 	using FChannelInfo = std::remove_reference_t<decltype(AllChannels)>::value_type;
@@ -898,7 +953,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		SessionByName.Add(FString(UTF8_TO_TCHAR(Ch.name.c_str())), &Ch);
 	}
 
-	const int32 DeviceSampleRate = AudioDevice->GetSampleRate();
+	const int32 DeviceSampleRate = ActiveDevice->GetSampleRate();
 
 	// --- Build desired state keyed by ChannelId ---
 	struct FDesiredOutput { USoundSubmix* Submix; };
@@ -1024,13 +1079,13 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		{
 			if (!ActiveMatched[Ai])
 			{
-				Bridge->RemoveOutput(Ai, AudioDevice);
+				Bridge->RemoveOutput(Ai);
 			}
 		}
 
 		for (int32 Di : UnmatchedDesired)
 		{
-			Bridge->AddOutput(DC.Outputs[Di].Submix, AudioDevice);
+			Bridge->AddOutput(DC.Outputs[Di].Submix, ActiveId);
 		}
 
 		if (Bridge->GetNumOutputs() == 0)
@@ -1256,22 +1311,38 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	// Retry deferred audio routes once AudioDevice becomes available
 	if (bSendRoutesPending || bReceiveRoutesPending)
 	{
-		FAudioDevice* AudioDevice = GetMainAudioDevice();
-		if (AudioDevice)
+		bIsRebuilding = true;
+		if (bSendRoutesPending && GetActiveDevice())
 		{
-			bIsRebuilding = true;
-			if (bSendRoutesPending)
+			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred send routes"));
+			RebuildAudioSends();
+		}
+		if (bReceiveRoutesPending)
+		{
+			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred receive routes"));
+			RebuildAudioReceives();
+		}
+		bIsRebuilding = false;
+		bChannelsDirty.store(false, std::memory_order_relaxed);
+	}
+
+	// Active device monitoring — recreate audio when device changes or after destruction
+	if (bEnableLinkAudio)
+	{
+		if (FAudioDeviceManager* ADM = FAudioDeviceManager::Get())
+		{
+			FAudioDeviceHandle ActiveHandle = ADM->GetActiveAudioDevice();
+			const Audio::FDeviceId ActiveId = ActiveHandle.IsValid()
+				? ActiveHandle.GetAudioDevice()->DeviceID
+				: static_cast<Audio::FDeviceId>(INDEX_NONE);
+
+			if (ActiveId != CurrentActiveDeviceId || bNeedsAudioRecreation)
 			{
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred send routes"));
-				RebuildAudioSends();
+				if (ActiveId != INDEX_NONE)
+				{
+					RecreateAudioOnDevice(ActiveId);
+				}
 			}
-			if (bReceiveRoutesPending)
-			{
-				UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred receive routes"));
-				RebuildAudioReceives();
-			}
-			bIsRebuilding = false;
-			bChannelsDirty.store(false, std::memory_order_relaxed);
 		}
 	}
 
@@ -1344,6 +1415,88 @@ void ULink4UESubsystem::RequestBeatAtTime(double Beat)
 
 	State.requestBeatAtTime(Beat, Now, Q);
 	LinkInstance->Link.commitAppSessionState(State);
+}
+
+// ---------------------------------------------------------------------------
+// Audio device transition — recreate all send/receive routes on a new device
+// ---------------------------------------------------------------------------
+
+void ULink4UESubsystem::RecreateAudioOnDevice(Audio::FDeviceId DeviceId)
+{
+	if (!LinkInstance || !bEnableLinkAudio)
+	{
+		return;
+	}
+
+	FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
+	if (!ADM)
+	{
+		return;
+	}
+
+	FAudioDeviceHandle NewHandle = ADM->GetAudioDevice(DeviceId);
+	FAudioDevice* NewDevice = NewHandle.GetAudioDevice();
+	if (!NewDevice)
+	{
+		return;
+	}
+
+	const Audio::FDeviceId OldId = CurrentActiveDeviceId;
+
+	// --- Receive: switch all bridges to the new device ---
+	for (auto& Recv : LinkInstance->ActiveReceives)
+	{
+		Recv->SwitchToDevice(DeviceId);
+	}
+
+	// --- Send: re-register listeners on the new device ---
+
+	// Master send
+	if (LinkInstance->MasterSend.Bridge.IsValid() && LinkInstance->MasterSend.Submix.IsValid())
+	{
+		// Unregister from old device (if still alive)
+		if (OldId != INDEX_NONE)
+		{
+			FAudioDeviceHandle OldHandle = ADM->GetAudioDevice(OldId);
+			if (OldHandle.IsValid())
+			{
+				OldHandle.GetAudioDevice()->UnregisterSubmixBufferListener(
+					LinkInstance->MasterSend.Bridge.ToSharedRef(),
+					*LinkInstance->MasterSend.Submix.Get());
+			}
+		}
+		NewDevice->RegisterSubmixBufferListener(
+			LinkInstance->MasterSend.Bridge.ToSharedRef(),
+			*LinkInstance->MasterSend.Submix.Get());
+	}
+
+	// User sends
+	for (auto& Send : LinkInstance->ActiveSends)
+	{
+		if (Send.Bridge.IsValid() && Send.Submix.IsValid())
+		{
+			if (OldId != INDEX_NONE)
+			{
+				FAudioDeviceHandle OldHandle = ADM->GetAudioDevice(OldId);
+				if (OldHandle.IsValid())
+				{
+					OldHandle.GetAudioDevice()->UnregisterSubmixBufferListener(
+						Send.Bridge.ToSharedRef(), *Send.Submix.Get());
+				}
+			}
+			NewDevice->RegisterSubmixBufferListener(
+				Send.Bridge.ToSharedRef(), *Send.Submix.Get());
+		}
+	}
+
+	CurrentActiveDeviceId = DeviceId;
+	bNeedsAudioRecreation = false;
+
+	UE_LOG(LogLink4UE, Log,
+		TEXT("Link4UE: Audio routes migrated (device %u -> %u, receives=%d, sends=%d)"),
+		OldId, DeviceId,
+		LinkInstance->ActiveReceives.Num(),
+		LinkInstance->ActiveSends.Num() + (LinkInstance->MasterSend.Bridge.IsValid() ? 1 : 0));
 }
 
 // ---------------------------------------------------------------------------

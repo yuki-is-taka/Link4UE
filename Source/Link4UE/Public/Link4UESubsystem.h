@@ -297,9 +297,11 @@ private:
 	/** Ticker delegate handle. */
 	FTSTicker::FDelegateHandle TickHandle;
 
-	/** AudioDevice creation callback — rebuilds routes when device becomes available. */
+	/** AudioDevice lifecycle callbacks. */
 	void OnAudioDeviceCreated(Audio::FDeviceId DeviceId);
+	void OnAudioDeviceDestroyed(Audio::FDeviceId DeviceId);
 	FDelegateHandle AudioDeviceCreatedHandle;
+	FDelegateHandle AudioDeviceDestroyedHandle;
 
 	/** True while send routes have not been successfully built yet. */
 	bool bSendRoutesPending = false;
@@ -309,4 +311,13 @@ private:
 
 	/** True while we are inside RebuildAudio* — suppresses re-entrant channel dirty flags. */
 	bool bIsRebuilding = false;
+
+	/** Currently active AudioDevice ID for send/receive routing. */
+	Audio::FDeviceId CurrentActiveDeviceId = INDEX_NONE;
+
+	/** Set by OnAudioDeviceDestroyed — triggers audio recreation on next Tick. */
+	bool bNeedsAudioRecreation = false;
+
+	/** Recreate all send/receive audio routes on the given device. */
+	void RecreateAudioOnDevice(Audio::FDeviceId DeviceId);
 };
