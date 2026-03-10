@@ -35,6 +35,16 @@ namespace
 		}
 		return nullptr;
 	}
+
+	FAudioDevice* GetDeviceById(Audio::FDeviceId DeviceId)
+	{
+		if (DeviceId == INDEX_NONE) return nullptr;
+		if (FAudioDeviceManager* ADM = FAudioDeviceManager::Get())
+		{
+			return ADM->GetAudioDevice(DeviceId).GetAudioDevice();
+		}
+		return nullptr;
+	}
 }
 
 DEFINE_LOG_CATEGORY_STATIC(LogLink4UE, Log, All);
@@ -190,27 +200,27 @@ public:
 		// 2. Stop FActiveSounds on the active device
 		// 3. TStrongObjectPtr releases USoundWaveProcedural
 		FScopeLock Lock(&OutputsLock);
-		Deactivate();
+		DeactivateLocked();
 	}
 
 	/** Add a logical output and create playback on the given device. */
-	void AddOutput(USoundSubmix* InTargetSubmix, Audio::FDeviceId DeviceId)
+	void AddOutput(USoundSubmix* InTargetSubmix, FAudioDevice* Device)
 	{
 		FScopeLock Lock(&OutputsLock);
 		FOutput& Out = Outputs.AddDefaulted_GetRef();
 		Out.TargetSubmix = InTargetSubmix;
 
-		if (DeviceId != INDEX_NONE)
+		if (Device)
 		{
-			CreateProceduralSound(Out, DeviceId);
+			CreateProceduralSound(Out, Device);
+			ActiveDeviceId = Device->DeviceID;
 		}
-		ActiveDeviceId = DeviceId;
 
 		UE_LOG(LogLink4UE, Log,
 			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s' (device=%u)"),
 			*ChannelName,
 			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("Master"),
-			DeviceId);
+			ActiveDeviceId);
 	}
 
 	/** Remove a logical output. */
@@ -231,26 +241,44 @@ public:
 			*ChannelName, *SubmixName);
 	}
 
-	/** Stop all outputs and recreate them on the new device. */
+	/** Stop all outputs and recreate them on the new device.
+	 *  Pass INDEX_NONE to deactivate without recreating. */
 	void SwitchToDevice(Audio::FDeviceId NewDeviceId)
 	{
 		FScopeLock Lock(&OutputsLock);
-		Deactivate();
+		DeactivateLocked();
 		ActiveDeviceId = NewDeviceId;
 		if (NewDeviceId == INDEX_NONE)
 		{
 			return;
 		}
+
+		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
+		if (!ADM) return;
+		FAudioDeviceHandle NewHandle = ADM->GetAudioDevice(NewDeviceId);
+		FAudioDevice* NewDevice = NewHandle.GetAudioDevice();
+		if (!NewDevice) return;
+
 		for (FOutput& Out : Outputs)
 		{
-			CreateProceduralSound(Out, NewDeviceId);
+			CreateProceduralSound(Out, NewDevice);
 		}
 	}
 
-	/** Stop all playback without removing logical outputs. */
-	void Deactivate()
+	int32 GetNumOutputs() const { return Outputs.Num(); }
+	USoundSubmix* GetOutputSubmix(int32 Index) const
 	{
-		// Can be called with or without OutputsLock held
+		return Outputs.IsValidIndex(Index) ? Outputs[Index].TargetSubmix.Get() : nullptr;
+	}
+
+	const FString& GetChannelIdHex() const { return ChannelIdHex; }
+	const FString& GetChannelName() const { return ChannelName; }
+	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
+
+private:
+	/** Stop all playback without removing logical outputs. Must be called under OutputsLock. */
+	void DeactivateLocked()
+	{
 		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
 		FAudioDevice* Device = nullptr;
 		if (ADM && ActiveDeviceId != INDEX_NONE)
@@ -270,29 +298,13 @@ public:
 		ActiveDeviceId = INDEX_NONE;
 	}
 
-	int32 GetNumOutputs() const { return Outputs.Num(); }
-	USoundSubmix* GetOutputSubmix(int32 Index) const
-	{
-		return Outputs.IsValidIndex(Index) ? Outputs[Index].TargetSubmix.Get() : nullptr;
-	}
-
-	const FString& GetChannelIdHex() const { return ChannelIdHex; }
-	const FString& GetChannelName() const { return ChannelName; }
-	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
-
-private:
 	/** Create a ProceduralSound + FActiveSound for one output on the given device. */
-	void CreateProceduralSound(FOutput& Out, Audio::FDeviceId DeviceId)
+	void CreateProceduralSound(FOutput& Out, FAudioDevice* Device)
 	{
-		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
-		if (!ADM) return;
-		FAudioDeviceHandle Handle = ADM->GetAudioDevice(DeviceId);
-		FAudioDevice* Device = Handle.GetAudioDevice();
-		if (!Device) return;
-
 		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(
 			GetTransientPackage());
-		Wave->SetSampleRate(Device->GetSampleRate());
+		const int32 Rate = Device->GetSampleRate();
+		Wave->SetSampleRate(Rate);
 		Wave->NumChannels = 2;
 		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
 		Wave->SoundGroup = SOUNDGROUP_Default;
@@ -318,20 +330,17 @@ private:
 		Device->AddNewActiveSound(NewActiveSound);
 		Out.ProceduralSound.Reset(Wave);
 
-		DeviceSampleRate.store(Device->GetSampleRate(), std::memory_order_relaxed);
+		DeviceSampleRate.store(Rate, std::memory_order_relaxed);
 	}
 
-	/** Stop and release a single output's playback. */
+	/** Stop and release a single output's playback. Must be called under OutputsLock. */
 	void StopOutput(FOutput& Out)
 	{
-		FAudioDeviceManager* ADM = FAudioDeviceManager::Get();
-		if (ADM && Out.ProceduralSound.IsValid() && ActiveDeviceId != INDEX_NONE)
+		if (Out.ProceduralSound.IsValid() && ActiveDeviceId != INDEX_NONE)
 		{
-			FAudioDeviceHandle Handle = ADM->GetAudioDevice(ActiveDeviceId);
-			if (Handle.IsValid())
+			if (FAudioDeviceManager* ADM = FAudioDeviceManager::Get())
 			{
-				Handle.GetAudioDevice()->StopSoundsUsingResource(
-					Out.ProceduralSound.Get());
+				ADM->StopSoundsUsingResource(Out.ProceduralSound.Get());
 			}
 		}
 		Out.ProceduralSound.Reset();
@@ -515,9 +524,9 @@ struct ULink4UESubsystem::FLinkInstance
 	{
 	}
 
-	void TearDownMasterSend()
+	void TearDownMasterSend(Audio::FDeviceId OnDeviceId)
 	{
-		FAudioDevice* AudioDevice = GetActiveDevice();
+		FAudioDevice* AudioDevice = GetDeviceById(OnDeviceId);
 		if (AudioDevice && MasterSend.Bridge.IsValid() && MasterSend.Submix.IsValid())
 		{
 			AudioDevice->UnregisterSubmixBufferListener(
@@ -527,9 +536,9 @@ struct ULink4UESubsystem::FLinkInstance
 		MasterSend.Submix.Reset();
 	}
 
-	void TearDownUserSends()
+	void TearDownUserSends(Audio::FDeviceId OnDeviceId)
 	{
-		FAudioDevice* AudioDevice = GetActiveDevice();
+		FAudioDevice* AudioDevice = GetDeviceById(OnDeviceId);
 		for (auto& Send : ActiveSends)
 		{
 			if (AudioDevice && Send.Bridge.IsValid() && Send.Submix.IsValid())
@@ -541,10 +550,10 @@ struct ULink4UESubsystem::FLinkInstance
 		ActiveSends.Empty();
 	}
 
-	void TearDownAllSends()
+	void TearDownAllSends(Audio::FDeviceId OnDeviceId)
 	{
-		TearDownMasterSend();
-		TearDownUserSends();
+		TearDownMasterSend(OnDeviceId);
+		TearDownUserSends(OnDeviceId);
 	}
 
 	void TearDownReceives()
@@ -652,7 +661,7 @@ void ULink4UESubsystem::Deinitialize()
 			LinkInstance->ActiveSends.Num(), LinkInstance->ActiveReceives.Num());
 
 		LinkInstance->TearDownReceives();
-		LinkInstance->TearDownAllSends();
+		LinkInstance->TearDownAllSends(CurrentActiveDeviceId);
 		LinkInstance->Link.enableLinkAudio(false);
 		LinkInstance->Link.enable(false);
 		delete LinkInstance;
@@ -710,7 +719,7 @@ void ULink4UESubsystem::OnAudioDeviceDestroyed(Audio::FDeviceId DeviceId)
 	{
 		for (auto& Recv : LinkInstance->ActiveReceives)
 		{
-			Recv->Deactivate();
+			Recv->SwitchToDevice(INDEX_NONE);
 		}
 	}
 
@@ -764,7 +773,7 @@ void ULink4UESubsystem::RebuildAudioSends()
 
 	if (!bEnableLinkAudio)
 	{
-		LinkInstance->TearDownAllSends();
+		LinkInstance->TearDownAllSends(CurrentActiveDeviceId);
 		bSendRoutesPending = false;
 		return;
 	}
@@ -1085,7 +1094,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 
 		for (int32 Di : UnmatchedDesired)
 		{
-			Bridge->AddOutput(DC.Outputs[Di].Submix, ActiveId);
+			Bridge->AddOutput(DC.Outputs[Di].Submix, ActiveDevice);
 		}
 
 		if (Bridge->GetNumOutputs() == 0)
@@ -1451,42 +1460,24 @@ void ULink4UESubsystem::RecreateAudioOnDevice(Audio::FDeviceId DeviceId)
 
 	// --- Send: re-register listeners on the new device ---
 
-	// Master send
-	if (LinkInstance->MasterSend.Bridge.IsValid() && LinkInstance->MasterSend.Submix.IsValid())
-	{
-		// Unregister from old device (if still alive)
-		if (OldId != INDEX_NONE)
-		{
-			FAudioDeviceHandle OldHandle = ADM->GetAudioDevice(OldId);
-			if (OldHandle.IsValid())
-			{
-				OldHandle.GetAudioDevice()->UnregisterSubmixBufferListener(
-					LinkInstance->MasterSend.Bridge.ToSharedRef(),
-					*LinkInstance->MasterSend.Submix.Get());
-			}
-		}
-		NewDevice->RegisterSubmixBufferListener(
-			LinkInstance->MasterSend.Bridge.ToSharedRef(),
-			*LinkInstance->MasterSend.Submix.Get());
-	}
+	FAudioDevice* OldDevice = GetDeviceById(OldId);
 
-	// User sends
-	for (auto& Send : LinkInstance->ActiveSends)
+	auto MigrateSend = [&](FLinkInstance::FActiveSend& Send)
 	{
-		if (Send.Bridge.IsValid() && Send.Submix.IsValid())
+		if (!Send.Bridge.IsValid() || !Send.Submix.IsValid()) return;
+		if (OldDevice)
 		{
-			if (OldId != INDEX_NONE)
-			{
-				FAudioDeviceHandle OldHandle = ADM->GetAudioDevice(OldId);
-				if (OldHandle.IsValid())
-				{
-					OldHandle.GetAudioDevice()->UnregisterSubmixBufferListener(
-						Send.Bridge.ToSharedRef(), *Send.Submix.Get());
-				}
-			}
-			NewDevice->RegisterSubmixBufferListener(
+			OldDevice->UnregisterSubmixBufferListener(
 				Send.Bridge.ToSharedRef(), *Send.Submix.Get());
 		}
+		NewDevice->RegisterSubmixBufferListener(
+			Send.Bridge.ToSharedRef(), *Send.Submix.Get());
+	};
+
+	MigrateSend(LinkInstance->MasterSend);
+	for (auto& Send : LinkInstance->ActiveSends)
+	{
+		MigrateSend(Send);
 	}
 
 	CurrentActiveDeviceId = DeviceId;
