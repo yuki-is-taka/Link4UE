@@ -1167,9 +1167,19 @@ void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName,
 	}
 #else
 	// Shipping build — apply side effects directly (no PostEditChangeProperty override)
+	if (!LinkInstance)
+	{
+		return;
+	}
+
 	if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio))
 	{
-		ApplySettings();
+		LinkInstance->Link.enableLinkAudio(bEnableLinkAudio);
+		bIsRebuilding = true;
+		RebuildAudioSends();
+		RebuildAudioReceives();
+		bIsRebuilding = false;
+		bChannelsDirty.store(false, std::memory_order_relaxed);
 	}
 	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, AudioSends))
 	{
@@ -1185,11 +1195,13 @@ void ULink4UESubsystem::NotifyPropertyChanged(FName PropertyName,
 		bIsRebuilding = false;
 		bChannelsDirty.store(false, std::memory_order_relaxed);
 	}
-	else if (LinkInstance)
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bStartStopSync))
 	{
 		LinkInstance->Link.enableStartStopSync(bStartStopSync);
+	}
+	else if (PropertyName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, PeerName))
+	{
 		LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
-		LinkInstance->Link.enable(bAutoConnect);
 	}
 #endif
 }
@@ -1231,22 +1243,40 @@ void ULink4UESubsystem::PostEditChangeProperty(FPropertyChangedEvent& PropertyCh
 		return;
 	}
 
-	// bEnableLinkAudio toggles audio routes on/off — full rebuild needed
+	// bEnableLinkAudio toggles audio routes on/off — rebuild needed
 	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bEnableLinkAudio))
 	{
-		ApplySettings();
+		LinkInstance->Link.enableLinkAudio(bEnableLinkAudio);
+		bIsRebuilding = true;
+		RebuildAudioSends();
+		RebuildAudioReceives();
+		bIsRebuilding = false;
+		bChannelsDirty.store(false, std::memory_order_relaxed);
 		return;
 	}
 
-	// Connection & defaults — update Link state without rebuilding audio routes
-	LinkInstance->Link.enableStartStopSync(bStartStopSync);
-	LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
-	LinkInstance->Link.enable(bAutoConnect);
-
-	const double Q = Link4UEQuantumToBeats(DefaultQuantum);
-	Quantum.store(Q, std::memory_order_relaxed);
-
-	SetTempo(DefaultTempo);
+	// Per-property dispatch — only apply the side effect for the changed property
+	if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bStartStopSync))
+	{
+		LinkInstance->Link.enableStartStopSync(bStartStopSync);
+	}
+	else if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, PeerName))
+	{
+		LinkInstance->Link.setPeerName(TCHAR_TO_UTF8(*PeerName));
+	}
+	else if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, bAutoConnect))
+	{
+		LinkInstance->Link.enable(bAutoConnect);
+	}
+	else if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, DefaultQuantum))
+	{
+		const double Q = Link4UEQuantumToBeats(DefaultQuantum);
+		Quantum.store(Q, std::memory_order_relaxed);
+	}
+	else if (PropName == GET_MEMBER_NAME_CHECKED(ULink4UESubsystem, DefaultTempo))
+	{
+		SetTempo(DefaultTempo);
+	}
 }
 #endif
 
@@ -1318,17 +1348,17 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	}
 
 	// Retry deferred audio routes once AudioDevice becomes available
-	if (bSendRoutesPending || bReceiveRoutesPending)
+	if ((bSendRoutesPending || bReceiveRoutesPending) && GetActiveDevice())
 	{
 		bIsRebuilding = true;
-		if (bSendRoutesPending && GetActiveDevice())
+		if (bSendRoutesPending)
 		{
 			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred send routes"));
 			RebuildAudioSends();
 		}
 		if (bReceiveRoutesPending)
 		{
-			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Audio device ready, rebuilding deferred receive routes"));
+			UE_LOG(LogLink4UE, Log, TEXT("Link4UE: Rebuilding deferred receive routes"));
 			RebuildAudioReceives();
 		}
 		bIsRebuilding = false;
