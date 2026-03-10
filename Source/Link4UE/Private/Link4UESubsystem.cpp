@@ -443,15 +443,19 @@ private:
 
 			const int32 WaveChannels = (Out.ChannelFormat == ELink4UEChannelFormat::Mono) ? 1 : 2;
 
-			// Overrun protection: threshold scales with Wave channel count.
-			// 1024 frames × WaveChannels × sizeof(int16) × 3 buffers
-			const int32 OverrunThreshold = 1024 * WaveChannels * sizeof(int16) * 3;
-			if (Out.ProceduralSound->GetAvailableAudioByteCount() > OverrunThreshold)
+			// Overrun protection: allow up to 250ms of queued audio before reset.
+			// This must be generous enough to accommodate large incoming buffers
+			// (LinkAudio sources may deliver thousands of frames per callback).
+			const int32 Rate = DeviceSampleRate.load(std::memory_order_relaxed);
+			const int32 MaxLatencyFrames = Rate > 0 ? (Rate / 4) : 12000; // 250ms
+			const int32 OverrunThreshold = MaxLatencyFrames * WaveChannels * sizeof(int16);
+			const int32 QueuedBytes = Out.ProceduralSound->GetAvailableAudioByteCount();
+			if (QueuedBytes > OverrunThreshold)
 			{
 				Out.ProceduralSound->ResetAudio();
 				UE_LOG(LogLink4UE, Warning,
 					TEXT("Link4UE [RECV] '%s': overrun detected (%d bytes queued, threshold=%d) — reset"),
-					*ChannelName, Out.ProceduralSound->GetAvailableAudioByteCount(), OverrunThreshold);
+					*ChannelName, QueuedBytes, OverrunThreshold);
 			}
 
 			if (SrcChannels == WaveChannels)
