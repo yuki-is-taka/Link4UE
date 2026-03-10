@@ -54,6 +54,7 @@ void FLink4UEAudioReceiveCustomization::CustomizeChildren(
 {
 	ChannelIdHandle = PropertyHandle->GetChildHandle(TEXT("ChannelId"));
 	ChannelNameHandle = PropertyHandle->GetChildHandle(TEXT("ChannelName"));
+	TSharedPtr<IPropertyHandle> ChannelFormatHandle = PropertyHandle->GetChildHandle(TEXT("ChannelFormat"));
 	TSharedPtr<IPropertyHandle> SubmixHandle = PropertyHandle->GetChildHandle(TEXT("Submix"));
 
 	RefreshChannelOptions();
@@ -137,6 +138,11 @@ void FLink4UEAudioReceiveCustomization::CustomizeChildren(
 				})
 			]
 		];
+	}
+
+	if (ChannelFormatHandle.IsValid())
+	{
+		ChildBuilder.AddProperty(ChannelFormatHandle.ToSharedRef());
 	}
 
 	if (SubmixHandle.IsValid())

@@ -167,11 +167,12 @@ private:
 class FLink4UEReceiveBridge
 {
 public:
-	/** Logical output (one per TargetSubmix). */
+	/** Logical output (one per TargetSubmix + ChannelFormat pair). */
 	struct FOutput
 	{
 		TWeakObjectPtr<USoundSubmix> TargetSubmix; // null = Master, used for diff matching
 		TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
+		ELink4UEChannelFormat ChannelFormat = ELink4UEChannelFormat::Stereo;
 	};
 
 	FLink4UEReceiveBridge(ableton::LinkAudio& InLink,
@@ -204,11 +205,13 @@ public:
 	}
 
 	/** Add a logical output and create playback on the given device. */
-	void AddOutput(USoundSubmix* InTargetSubmix, FAudioDevice* Device)
+	void AddOutput(USoundSubmix* InTargetSubmix, FAudioDevice* Device,
+		ELink4UEChannelFormat InFormat = ELink4UEChannelFormat::Stereo)
 	{
 		FScopeLock Lock(&OutputsLock);
 		FOutput& Out = Outputs.AddDefaulted_GetRef();
 		Out.TargetSubmix = InTargetSubmix;
+		Out.ChannelFormat = InFormat;
 
 		if (Device)
 		{
@@ -217,9 +220,10 @@ public:
 		}
 
 		UE_LOG(LogLink4UE, Log,
-			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s' (device=%u)"),
+			TEXT("Link4UE: Receive output added — '%s' -> Submix '%s' (%s, device=%u)"),
 			*ChannelName,
 			InTargetSubmix ? *InTargetSubmix->GetName() : TEXT("Master"),
+			InFormat == ELink4UEChannelFormat::Mono ? TEXT("mono") : TEXT("stereo"),
 			ActiveDeviceId);
 	}
 
@@ -270,6 +274,10 @@ public:
 	{
 		return Outputs.IsValidIndex(Index) ? Outputs[Index].TargetSubmix.Get() : nullptr;
 	}
+	ELink4UEChannelFormat GetOutputChannelFormat(int32 Index) const
+	{
+		return Outputs.IsValidIndex(Index) ? Outputs[Index].ChannelFormat : ELink4UEChannelFormat::Stereo;
+	}
 
 	const FString& GetChannelIdHex() const { return ChannelIdHex; }
 	const FString& GetChannelName() const { return ChannelName; }
@@ -318,7 +326,7 @@ private:
 			GetTransientPackage());
 		const int32 Rate = Device->GetSampleRate();
 		Wave->SetSampleRate(Rate);
-		Wave->NumChannels = 2;
+		Wave->NumChannels = (Out.ChannelFormat == ELink4UEChannelFormat::Mono) ? 1 : 2;
 		Wave->Duration = INDEFINITELY_LOOPING_DURATION;
 		Wave->SoundGroup = SOUNDGROUP_Default;
 		Wave->bLooping = true;
@@ -422,39 +430,66 @@ private:
 			AudioBytes = DstFrames * SrcChannels * sizeof(int16);
 		}
 
-		// Mono→stereo: duplicate each sample to L and R (unity gain, DAW convention).
-		// Wave is always 2ch; queuing 1ch data into a 2ch Wave breaks the mixer.
-		if (SrcChannels == 1)
-		{
-			const int16* MonoData = reinterpret_cast<const int16*>(AudioData);
-			const int32 MonoSamples = AudioBytes / sizeof(int16);
-			MonoToStereoBuffer.SetNumUninitialized(MonoSamples * 2, EAllowShrinking::No);
-			for (int32 i = 0; i < MonoSamples; ++i)
-			{
-				MonoToStereoBuffer[i * 2]     = MonoData[i];
-				MonoToStereoBuffer[i * 2 + 1] = MonoData[i];
-			}
-			AudioData = reinterpret_cast<const uint8*>(MonoToStereoBuffer.GetData());
-			AudioBytes = MonoSamples * 2 * sizeof(int16);
-		}
-
-		// Push to all outputs (single device)
+		// Push to all outputs with per-output channel conversion.
+		// Each output's Wave has a fixed channel count (1 or 2) determined by ChannelFormat.
+		// Incoming Link Audio data (SrcChannels) is converted to match at the Wave boundary.
 		FScopeLock Lock(&OutputsLock);
 		for (FOutput& Out : Outputs)
 		{
-			if (Out.ProceduralSound.IsValid())
+			if (!Out.ProceduralSound.IsValid())
 			{
-				// Overrun protection: if queued data exceeds the threshold,
-				// reset the buffer to prevent unbounded latency accumulation.
-				// This causes a click but is preferable to growing delay.
-				if (Out.ProceduralSound->GetAvailableAudioByteCount() > OverrunThresholdBytes)
-				{
-					Out.ProceduralSound->ResetAudio();
-					UE_LOG(LogLink4UE, Warning,
-						TEXT("Link4UE [RECV] '%s': overrun detected (%d bytes queued, threshold=%d) — reset"),
-						*ChannelName, Out.ProceduralSound->GetAvailableAudioByteCount(), OverrunThresholdBytes);
-				}
+				continue;
+			}
+
+			const int32 WaveChannels = (Out.ChannelFormat == ELink4UEChannelFormat::Mono) ? 1 : 2;
+
+			// Overrun protection: threshold scales with Wave channel count.
+			// 1024 frames × WaveChannels × sizeof(int16) × 3 buffers
+			const int32 OverrunThreshold = 1024 * WaveChannels * sizeof(int16) * 3;
+			if (Out.ProceduralSound->GetAvailableAudioByteCount() > OverrunThreshold)
+			{
+				Out.ProceduralSound->ResetAudio();
+				UE_LOG(LogLink4UE, Warning,
+					TEXT("Link4UE [RECV] '%s': overrun detected (%d bytes queued, threshold=%d) — reset"),
+					*ChannelName, Out.ProceduralSound->GetAvailableAudioByteCount(), OverrunThreshold);
+			}
+
+			if (SrcChannels == WaveChannels)
+			{
+				// Pass-through: channel count matches
 				Out.ProceduralSound->QueueAudio(AudioData, AudioBytes);
+			}
+			else if (SrcChannels == 1 && WaveChannels == 2)
+			{
+				// Mono→Stereo: duplicate each sample to L and R (unity gain, DAW convention)
+				const int16* MonoData = reinterpret_cast<const int16*>(AudioData);
+				const int32 MonoSamples = AudioBytes / sizeof(int16);
+				MonoToStereoBuffer.SetNumUninitialized(MonoSamples * 2, EAllowShrinking::No);
+				for (int32 i = 0; i < MonoSamples; ++i)
+				{
+					MonoToStereoBuffer[i * 2]     = MonoData[i];
+					MonoToStereoBuffer[i * 2 + 1] = MonoData[i];
+				}
+				Out.ProceduralSound->QueueAudio(
+					reinterpret_cast<const uint8*>(MonoToStereoBuffer.GetData()),
+					MonoSamples * 2 * sizeof(int16));
+			}
+			else if (SrcChannels == 2 && WaveChannels == 1)
+			{
+				// Stereo→Mono: (L+R)/2 downmix
+				const int16* StereoData = reinterpret_cast<const int16*>(AudioData);
+				const int32 StereoSamples = AudioBytes / sizeof(int16);
+				const int32 MonoFrames = StereoSamples / 2;
+				StereoToMonoBuffer.SetNumUninitialized(MonoFrames, EAllowShrinking::No);
+				for (int32 i = 0; i < MonoFrames; ++i)
+				{
+					const int32 L = StereoData[i * 2];
+					const int32 R = StereoData[i * 2 + 1];
+					StereoToMonoBuffer[i] = static_cast<int16>((L + R) / 2);
+				}
+				Out.ProceduralSound->QueueAudio(
+					reinterpret_cast<const uint8*>(StereoToMonoBuffer.GetData()),
+					MonoFrames * sizeof(int16));
 			}
 		}
 	}
@@ -469,11 +504,7 @@ private:
 
 	TArray<int16> ResampleBuffer;
 	TArray<int16> MonoToStereoBuffer;
-
-	// Overrun threshold: 3 callback buffers worth of stereo int16 data.
-	// Mac CoreAudio = 1024 frames; other platforms may be smaller but 1024 is a safe upper bound.
-	// 1024 frames × 2 ch × 2 bytes × 3 = 12288 bytes
-	static constexpr int32 OverrunThresholdBytes = 1024 * 2 * sizeof(int16) * 3;
+	TArray<int16> StereoToMonoBuffer;
 
 };
 
@@ -1027,7 +1058,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 	const int32 DeviceSampleRate = ActiveDevice->GetSampleRate();
 
 	// --- Build desired state keyed by ChannelId ---
-	struct FDesiredOutput { USoundSubmix* Submix; };
+	struct FDesiredOutput { USoundSubmix* Submix; ELink4UEChannelFormat ChannelFormat; };
 	struct FDesiredChannel
 	{
 		ableton::ChannelId Id;
@@ -1069,7 +1100,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		DC.Id = Found->id;
 		DC.Name = FString(UTF8_TO_TCHAR(Found->name.c_str()));
 		USoundSubmix* Submix = RecvDef.Submix.LoadSynchronous();
-		DC.Outputs.Add({Submix});
+		DC.Outputs.Add({Submix, RecvDef.ChannelFormat});
 	}
 
 	// --- Diff against active bridges (keyed by ChannelIdHex) ---
@@ -1133,7 +1164,8 @@ void ULink4UESubsystem::RebuildAudioReceives()
 			for (int32 Ai = 0; Ai < Bridge->GetNumOutputs(); ++Ai)
 			{
 				if (!ActiveMatched[Ai]
-					&& Bridge->GetOutputSubmix(Ai) == DC.Outputs[Di].Submix)
+					&& Bridge->GetOutputSubmix(Ai) == DC.Outputs[Di].Submix
+					&& Bridge->GetOutputChannelFormat(Ai) == DC.Outputs[Di].ChannelFormat)
 				{
 					ActiveMatched[Ai] = true;
 					bFound = true;
@@ -1156,7 +1188,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 
 		for (int32 Di : UnmatchedDesired)
 		{
-			Bridge->AddOutput(DC.Outputs[Di].Submix, ActiveDevice);
+			Bridge->AddOutput(DC.Outputs[Di].Submix, ActiveDevice, DC.Outputs[Di].ChannelFormat);
 		}
 
 		if (Bridge->GetNumOutputs() == 0)
@@ -1702,7 +1734,8 @@ void ULink4UESubsystem::ClearAudioSends()
 // Audio Receive Mutators
 // ---------------------------------------------------------------------------
 
-bool ULink4UESubsystem::AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix)
+bool ULink4UESubsystem::AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix,
+	ELink4UEChannelFormat ChannelFormat)
 {
 	if (ChannelId.IsEmpty())
 	{
@@ -1726,6 +1759,7 @@ bool ULink4UESubsystem::AddAudioReceive(const FString& ChannelId, USoundSubmix* 
 	FLink4UEAudioReceive Recv;
 	Recv.ChannelId = ChannelId;
 	Recv.ChannelName = ChannelName;
+	Recv.ChannelFormat = ChannelFormat;
 	Recv.Submix = Submix;
 
 	AudioReceives.Add(MoveTemp(Recv));

@@ -211,7 +211,8 @@ public:
 	 *  ChannelId must not be empty. ChannelName is auto-resolved from the live session.
 	 *  Returns true on success. */
 	UFUNCTION(BlueprintCallable, Category = "Link4UE|Audio")
-	bool AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix = nullptr);
+	bool AddAudioReceive(const FString& ChannelId, USoundSubmix* Submix = nullptr,
+		ELink4UEChannelFormat ChannelFormat = ELink4UEChannelFormat::Stereo);
 
 	/** Remove all receive routes for the given ChannelId.
 	 *  Returns true if any entries were removed. */

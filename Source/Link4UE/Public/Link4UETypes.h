@@ -28,6 +28,14 @@ enum class ELink4UEQuantum : uint8
 /** Convert a quantum preset to its beat value. */
 LINK4UE_API double Link4UEQuantumToBeats(ELink4UEQuantum Preset);
 
+/** Channel format for a receive route — determines the Wave's channel count. */
+UENUM(BlueprintType)
+enum class ELink4UEChannelFormat : uint8
+{
+	Stereo	UMETA(DisplayName = "Stereo"),
+	Mono	UMETA(DisplayName = "Mono"),
+};
+
 /** Defines a Submix → LinkAudio send route. */
 USTRUCT(BlueprintType)
 struct LINK4UE_API FLink4UEAudioSend
@@ -62,6 +70,11 @@ struct LINK4UE_API FLink4UEAudioReceive
 	/** Channel display name (auto-updated on rename). */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
 	FString ChannelName;
+
+	/** Channel format — Mono creates a 1ch Wave, Stereo creates a 2ch Wave.
+	 *  Incoming audio is converted to match (mono↔stereo) at the Wave boundary. */
+	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")
+	ELink4UEChannelFormat ChannelFormat = ELink4UEChannelFormat::Stereo;
 
 	/** Target Submix for audio output. Empty = Master Submix. */
 	UPROPERTY(Config, EditAnywhere, BlueprintReadWrite, Category = "Link4UE")

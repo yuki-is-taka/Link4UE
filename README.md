@@ -179,11 +179,14 @@ Add entries to **Audio Receives** in Project Settings:
 | Field | Description |
 |-------|-------------|
 | Channel | Dropdown of available remote channels. Requires Link Audio enabled and peers connected |
+| Channel Format | Mono or Stereo. Determines the internal Wave's channel count. Incoming audio is converted to match (mono↔stereo) at the Wave boundary |
 | Submix | Target Submix for playback. Empty = Master Submix |
 
 Channels are identified by a stable ID internally. If a peer renames a channel (e.g. renaming a track in Ableton Live), the routing stays intact and the display name auto-updates.
 
 Multiple receives can reference the same remote channel with different target Submixes — the audio is shared without duplication overhead.
+
+**Channel Format** works like a DAW track's channel setting: a Mono receive creates a 1-channel source suitable for spatialization, while Stereo creates a 2-channel source for pre-panned audio. If the remote channel's actual format differs, conversion happens automatically — mono sources are duplicated to stereo (unity gain), stereo sources are downmixed to mono ((L+R)/2).
 
 ### Channel Discovery
 
