@@ -63,10 +63,25 @@ static TAutoConsoleVariable<int32> CVarLatencyLog(
 	TEXT("  2 = Every callback (high volume debug)"),
 	ECVF_Default);
 
+// Link4UE.JitterBuffer — -1: adaptive (default), 0: minimum latency, N: fixed N ms
+static TAutoConsoleVariable<int32> CVarJitterBuffer(
+	TEXT("Link4UE.JitterBuffer"),
+	-1,
+	TEXT("Jitter buffer target for Link Audio receive.\n")
+	TEXT("  -1 = Adaptive (underrun-driven, default)\n")
+	TEXT("   0 = Minimum latency (1 render cycle cushion)\n")
+	TEXT("   N = Fixed target of N milliseconds"),
+	ECVF_Default);
+
 // ---------------------------------------------------------------------------
 // FLink4UESoundGenerator — ISoundGenerator that pulls from a lock-free ring
-//   buffer fed by LinkAudio SDK callbacks.  Adaptive flush discards stale
-//   data when the buffer grows beyond a dynamically computed threshold.
+//   buffer fed by LinkAudio SDK callbacks.
+//
+//   Consumer-side buffer management:
+//   - Producer (SDK thread) only pushes data, never flushes.
+//   - Consumer (mixer thread) trims excess to maintain target level.
+//   - Adaptive target: increases fast on underrun, decreases slowly when stable.
+//   - All parameters derived from runtime values (no hardcoded constants).
 // ---------------------------------------------------------------------------
 
 class FLink4UESoundGenerator : public ISoundGenerator
@@ -74,36 +89,81 @@ class FLink4UESoundGenerator : public ISoundGenerator
 public:
 	FLink4UESoundGenerator(float InSampleRate, int32 InRenderCycleFrames, int32 InNumChannels)
 		: SampleRate(InSampleRate)
-		, RenderCycleFrames(InRenderCycleFrames)
 		, NumChannels(InNumChannels)
 		, RenderCycleSamples(InRenderCycleFrames * InNumChannels)
 		, RingBuffer(static_cast<uint32>(InSampleRate * InNumChannels))  // 1 second capacity
+		, TargetSamples(InRenderCycleFrames * InNumChannels * 2)
+		, MinTargetSamples(InRenderCycleFrames * InNumChannels)
+		, MaxTargetSamples(static_cast<int32>(InSampleRate * InNumChannels / 2))  // 500ms
+		, StableThreshold(static_cast<int32>((InSampleRate / InRenderCycleFrames) * 5))  // ~5 sec
 	{
 	}
 
 	//~ ISoundGenerator interface
 	virtual int32 OnGenerateAudio(float* OutAudio, int32 NumSamples) override
 	{
-		// Flush requested by producer — consumer owns ReadCounter, so reset here.
-		if (bFlushRequested.exchange(false, std::memory_order_acquire))
+		// --- CVar check: react to dynamic changes ---
+		const int32 CVarVal = CVarJitterBuffer.GetValueOnAnyThread();
+		if (CVarVal != LastCVarValue)
 		{
-			RingBuffer.SetNum(0);
+			LastCVarValue = CVarVal;
+			if (CVarVal == 0)
+			{
+				TargetSamples = MinTargetSamples;
+			}
+			else if (CVarVal > 0)
+			{
+				TargetSamples = FMath::Clamp(
+					static_cast<int32>(CVarVal * SampleRate * NumChannels / 1000.0f),
+					MinTargetSamples, MaxTargetSamples);
+			}
+			// CVarVal == -1: adaptive mode, don't force-set target
+			StableCount = 0;
+		}
+		const bool bAdaptive = (CVarVal < 0);
+
+		// --- Trim excess: keep TargetSamples + NumSamples, discard oldest ---
+		// Pop(uint32) advances ReadCounter without copying data.
+		const int32 Available = static_cast<int32>(RingBuffer.Num());
+		const int32 Excess = Available - TargetSamples - NumSamples;
+		if (Excess > 0)
+		{
+			RingBuffer.Pop(static_cast<uint32>(Excess));
+			TrimCount.fetch_add(1, std::memory_order_relaxed);
 		}
 
-		const uint32 Available = RingBuffer.Num();
-		if (Available == 0)
+		// --- Pop requested samples ---
+		const int32 Popped = RingBuffer.Pop(OutAudio, NumSamples);
+
+		// --- Underrun: zero-fill remainder ---
+		bool bUnderrun = false;
+		if (Popped < NumSamples)
 		{
-			FMemory::Memzero(OutAudio, NumSamples * sizeof(float));
-			return NumSamples;
+			FMemory::Memzero(OutAudio + Popped, (NumSamples - Popped) * sizeof(float));
+			bUnderrun = true;
 		}
 
-		const int32 ToRead = FMath::Min(NumSamples, static_cast<int32>(Available));
-		RingBuffer.Pop(OutAudio, ToRead);
-
-		// Zero-fill remainder on underrun
-		if (ToRead < NumSamples)
+		// --- Adaptive target update (only in auto mode, after first data received) ---
+		if (bAdaptive && bEverReceived.load(std::memory_order_relaxed))
 		{
-			FMemory::Memzero(OutAudio + ToRead, (NumSamples - ToRead) * sizeof(float));
+			if (bUnderrun)
+			{
+				// Fast increase: deficit + 1 render cycle margin,
+				// capped at 2 render cycles to avoid runaway growth
+				// under periodic jitter.
+				const int32 Deficit = NumSamples - Popped;
+				const int32 Increase = FMath::Min(Deficit + NumSamples, RenderCycleSamples * 2);
+				TargetSamples += Increase;
+				TargetSamples = FMath::Min(TargetSamples, MaxTargetSamples);
+				StableCount = 0;
+			}
+			else if (++StableCount > StableThreshold)
+			{
+				// Slow decrease: 1/4 render cycle per stable period (min 1 sample)
+				TargetSamples -= FMath::Max(NumSamples / 4, 1);
+				TargetSamples = FMath::Max(TargetSamples, MinTargetSamples);
+				StableCount = 0;
+			}
 		}
 
 		return NumSamples;
@@ -114,42 +174,35 @@ public:
 		return RenderCycleSamples;
 	}
 
-	/** Push float audio data from the SDK callback thread.
-	 *  Performs adaptive flush if buffer accumulation exceeds threshold. */
+	/** Push float audio data from the SDK callback thread. Producer only pushes. */
 	void PushAudio(const float* Data, int32 NumSamples)
 	{
-		// Adaptive flush threshold:
-		//   max(last callback size * 3, render cycle * 2)
-		// Ensures stability for both large infrequent and small frequent callbacks.
-		LastCallbackSamples.store(NumSamples, std::memory_order_relaxed);
-		const int32 Threshold = FMath::Max(NumSamples * 3, RenderCycleSamples * 2);
-
-		const int32 Buffered = static_cast<int32>(RingBuffer.Num());
-		if (Buffered > Threshold)
-		{
-			// Signal consumer to reset — SetNum(0) modifies ReadCounter,
-			// which must only be written from the consumer (mixer) thread.
-			bFlushRequested.store(true, std::memory_order_release);
-			FlushCount.fetch_add(1, std::memory_order_relaxed);
-		}
-
+		bEverReceived.store(true, std::memory_order_relaxed);
 		RingBuffer.Push(Data, NumSamples);
 	}
 
-	int32 GetAndResetFlushCount()
+	int32 GetAndResetTrimCount()
 	{
-		return FlushCount.exchange(0, std::memory_order_relaxed);
+		return TrimCount.exchange(0, std::memory_order_relaxed);
 	}
 
 private:
 	float SampleRate;
-	int32 RenderCycleFrames;
 	int32 NumChannels;
 	int32 RenderCycleSamples;
 	Audio::TCircularAudioBuffer<float> RingBuffer;
-	std::atomic<int32> LastCallbackSamples{0};
-	std::atomic<bool> bFlushRequested{false};
-	std::atomic<int32> FlushCount{0};
+
+	// Adaptive state (audio thread only — no atomics needed)
+	int32 TargetSamples;
+	int32 MinTargetSamples;
+	int32 MaxTargetSamples;
+	int32 StableThreshold;
+	int32 StableCount = 0;
+	int32 LastCVarValue = -1;
+
+	// Cross-thread state
+	std::atomic<bool> bEverReceived{false};     // Producer → Consumer
+	std::atomic<int32> TrimCount{0};            // Consumer → GameThread (monitoring)
 };
 
 // ---------------------------------------------------------------------------
@@ -408,8 +461,8 @@ public:
 	const FString& GetChannelName() const { return ChannelName; }
 	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
 
-	/** Collect and reset flush counts from all active generators. Returns total flushes. */
-	int32 DrainFlushCount()
+	/** Collect and reset trim counts from all active generators. Returns total trims. */
+	int32 DrainTrimCount()
 	{
 		int32 Total = 0;
 		FScopeLock Lock(&OutputsLock);
@@ -419,7 +472,7 @@ public:
 			{
 				if (FLink4UESoundGenerator* Gen = Out.ProceduralSound->GetGenerator())
 				{
-					Total += Gen->GetAndResetFlushCount();
+					Total += Gen->GetAndResetTrimCount();
 				}
 			}
 		}
@@ -1700,13 +1753,13 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 
 		for (auto& Bridge : LinkInstance->ActiveReceives)
 		{
-			// Flush count (always reported when it happens)
-			const int32 Flushed = Bridge->DrainFlushCount();
-			if (Flushed > 0)
+			// Trim count (always reported when it happens)
+			const int32 Trimmed = Bridge->DrainTrimCount();
+			if (Trimmed > 0)
 			{
-				UE_LOG(LogLink4UE, Warning,
-					TEXT("Link4UE: '%s' flushed %d time(s) — buffer overrun discarded"),
-					*Bridge->GetChannelName(), Flushed);
+				UE_LOG(LogLink4UE, Log,
+					TEXT("Link4UE: '%s' trimmed excess %d time(s)"),
+					*Bridge->GetChannelName(), Trimmed);
 			}
 
 			// Latency summary (level 1+, throttled to ~1 sec)
