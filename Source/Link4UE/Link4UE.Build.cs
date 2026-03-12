@@ -20,6 +20,7 @@ public class Link4UE : ModuleRules
 			{
 				"CoreUObject",
 				"AudioMixer",
+				"AudioExtensions",
 				"SignalProcessing",
 				"Settings",
 			}

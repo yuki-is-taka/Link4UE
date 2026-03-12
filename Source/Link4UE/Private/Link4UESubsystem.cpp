@@ -1,6 +1,7 @@
 // Copyright YUKITAKA. All Rights Reserved.
 
 #include "Link4UESubsystem.h"
+#include "Link4UEProceduralSound.h"
 #if WITH_EDITOR
 #include "ISettingsModule.h"
 #endif
@@ -8,6 +9,8 @@
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
 #include "Sound/SoundWaveProcedural.h"
+#include "Sound/SoundGenerator.h"
+#include "DSP/Dsp.h"
 #include "ActiveSound.h"
 #include "ableton/LinkAudio.hpp"
 #include "ableton/util/FloatIntConversion.hpp"
@@ -15,6 +18,7 @@
 namespace
 {
 	constexpr size_t kDefaultMaxSamples = 8192;
+	constexpr float kInt16ToFloat = 1.0f / 32768.0f;
 
 	FString NodeIdToHex(const ableton::link::NodeId& Id)
 	{
@@ -48,6 +52,119 @@ namespace
 }
 
 DEFINE_LOG_CATEGORY_STATIC(LogLink4UE, Log, All);
+
+// Link4UE.LatencyLog — 0: off, 1: periodic summary (1 sec), 2: every callback
+static TAutoConsoleVariable<int32> CVarLatencyLog(
+	TEXT("Link4UE.LatencyLog"),
+	0,
+	TEXT("Link Audio receive latency logging level.\n")
+	TEXT("  0 = Off\n")
+	TEXT("  1 = Periodic summary (avg/max per second)\n")
+	TEXT("  2 = Every callback (high volume debug)"),
+	ECVF_Default);
+
+// ---------------------------------------------------------------------------
+// FLink4UESoundGenerator — ISoundGenerator that pulls from a lock-free ring
+//   buffer fed by LinkAudio SDK callbacks.  Adaptive flush discards stale
+//   data when the buffer grows beyond a dynamically computed threshold.
+// ---------------------------------------------------------------------------
+
+class FLink4UESoundGenerator : public ISoundGenerator
+{
+public:
+	FLink4UESoundGenerator(float InSampleRate, int32 InRenderCycleFrames, int32 InNumChannels)
+		: SampleRate(InSampleRate)
+		, RenderCycleFrames(InRenderCycleFrames)
+		, NumChannels(InNumChannels)
+		, RenderCycleSamples(InRenderCycleFrames * InNumChannels)
+		, RingBuffer(static_cast<uint32>(InSampleRate * InNumChannels))  // 1 second capacity
+	{
+	}
+
+	//~ ISoundGenerator interface
+	virtual int32 OnGenerateAudio(float* OutAudio, int32 NumSamples) override
+	{
+		// Flush requested by producer — consumer owns ReadCounter, so reset here.
+		if (bFlushRequested.exchange(false, std::memory_order_acquire))
+		{
+			RingBuffer.SetNum(0);
+		}
+
+		const uint32 Available = RingBuffer.Num();
+		if (Available == 0)
+		{
+			FMemory::Memzero(OutAudio, NumSamples * sizeof(float));
+			return NumSamples;
+		}
+
+		const int32 ToRead = FMath::Min(NumSamples, static_cast<int32>(Available));
+		RingBuffer.Pop(OutAudio, ToRead);
+
+		// Zero-fill remainder on underrun
+		if (ToRead < NumSamples)
+		{
+			FMemory::Memzero(OutAudio + ToRead, (NumSamples - ToRead) * sizeof(float));
+		}
+
+		return NumSamples;
+	}
+
+	virtual int32 GetDesiredNumSamplesToRenderPerCallback() const override
+	{
+		return RenderCycleSamples;
+	}
+
+	/** Push float audio data from the SDK callback thread.
+	 *  Performs adaptive flush if buffer accumulation exceeds threshold. */
+	void PushAudio(const float* Data, int32 NumSamples)
+	{
+		// Adaptive flush threshold:
+		//   max(last callback size * 3, render cycle * 2)
+		// Ensures stability for both large infrequent and small frequent callbacks.
+		LastCallbackSamples.store(NumSamples, std::memory_order_relaxed);
+		const int32 Threshold = FMath::Max(NumSamples * 3, RenderCycleSamples * 2);
+
+		const int32 Buffered = static_cast<int32>(RingBuffer.Num());
+		if (Buffered > Threshold)
+		{
+			// Signal consumer to reset — SetNum(0) modifies ReadCounter,
+			// which must only be written from the consumer (mixer) thread.
+			bFlushRequested.store(true, std::memory_order_release);
+			FlushCount.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		RingBuffer.Push(Data, NumSamples);
+	}
+
+	int32 GetAndResetFlushCount()
+	{
+		return FlushCount.exchange(0, std::memory_order_relaxed);
+	}
+
+private:
+	float SampleRate;
+	int32 RenderCycleFrames;
+	int32 NumChannels;
+	int32 RenderCycleSamples;
+	Audio::TCircularAudioBuffer<float> RingBuffer;
+	std::atomic<int32> LastCallbackSamples{0};
+	std::atomic<bool> bFlushRequested{false};
+	std::atomic<int32> FlushCount{0};
+};
+
+// ---------------------------------------------------------------------------
+// ULink4UEProceduralSound implementation
+// ---------------------------------------------------------------------------
+
+ISoundGeneratorPtr ULink4UEProceduralSound::CreateSoundGenerator(
+	const FSoundGeneratorInitParams& InParams)
+{
+	Generator = MakeShared<FLink4UESoundGenerator>(
+		InParams.SampleRate,
+		InParams.AudioMixerNumOutputFrames,
+		InParams.NumChannels);
+	return Generator;
+}
 
 // ---------------------------------------------------------------------------
 // FLink4UESendBridge — captures Submix audio and commits to a LinkAudio Sink
@@ -158,7 +275,7 @@ private:
 
 // ---------------------------------------------------------------------------
 // FLink4UEReceiveBridge — receives LinkAudio Source data and routes to Submix
-//   via USoundWaveProcedural + FActiveSound (no UAudioComponent needed)
+//   via ULink4UEProceduralSound + ISoundGenerator (pull model)
 //
 //   Active-device-only design: all outputs play on a single device at a time.
 //   SwitchToDevice() stops the old device's sounds and recreates on the new one.
@@ -171,15 +288,18 @@ public:
 	struct FOutput
 	{
 		TWeakObjectPtr<USoundSubmix> TargetSubmix; // null = Master, used for diff matching
-		TStrongObjectPtr<USoundWaveProcedural> ProceduralSound;
+		TStrongObjectPtr<ULink4UEProceduralSound> ProceduralSound;
 		ELink4UEChannelFormat ChannelFormat = ELink4UEChannelFormat::Stereo;
 	};
 
 	FLink4UEReceiveBridge(ableton::LinkAudio& InLink,
 		const ableton::ChannelId& InChannelId,
 		int32 InDeviceSampleRate,
-		const FString& InChannelName)
-		: ChannelIdHex(NodeIdToHex(InChannelId))
+		const FString& InChannelName,
+		const std::atomic<double>& InQuantumRef)
+		: LinkRef(InLink)
+		, QuantumRef(InQuantumRef)
+		, ChannelIdHex(NodeIdToHex(InChannelId))
 		, DeviceSampleRate(InDeviceSampleRate)
 		, ChannelName(InChannelName)
 		, Source(InLink, InChannelId,
@@ -197,9 +317,9 @@ public:
 	{
 		// Teardown order:
 		// 1. Source destructor fires first (member destruction order is reverse)
-		//    → SDK callback stops, no more QueueAudio calls
+		//    → SDK callback stops, no more PushAudio calls
 		// 2. Stop FActiveSounds on the active device
-		// 3. TStrongObjectPtr releases USoundWaveProcedural
+		// 3. TStrongObjectPtr releases ULink4UEProceduralSound
 		FScopeLock Lock(&OutputsLock);
 		DeactivateLocked();
 	}
@@ -288,6 +408,30 @@ public:
 	const FString& GetChannelName() const { return ChannelName; }
 	void SetChannelName(const FString& NewName) { ChannelName = NewName; }
 
+	/** Collect and reset flush counts from all active generators. Returns total flushes. */
+	int32 DrainFlushCount()
+	{
+		int32 Total = 0;
+		FScopeLock Lock(&OutputsLock);
+		for (FOutput& Out : Outputs)
+		{
+			if (Out.ProceduralSound.IsValid())
+			{
+				if (FLink4UESoundGenerator* Gen = Out.ProceduralSound->GetGenerator())
+				{
+					Total += Gen->GetAndResetFlushCount();
+				}
+			}
+		}
+		return Total;
+	}
+
+	/** Drain latency stats accumulated since last call. Returns false if no samples. */
+	bool DrainLatencyStats(double& OutAvgMs, double& OutMaxMs, int32& OutCount)
+	{
+		return LatencyStats.Drain(OutAvgMs, OutMaxMs, OutCount);
+	}
+
 private:
 	/** Stop all playback without removing logical outputs. Must be called under OutputsLock. */
 	void DeactivateLocked()
@@ -327,7 +471,7 @@ private:
 	 *  because runtime headroom changes are extremely rare in practice. */
 	void CreateProceduralSound(FOutput& Out, FAudioDevice* Device)
 	{
-		USoundWaveProcedural* Wave = NewObject<USoundWaveProcedural>(
+		ULink4UEProceduralSound* Wave = NewObject<ULink4UEProceduralSound>(
 			GetTransientPackage());
 		const int32 Rate = Device->GetSampleRate();
 		Wave->SetSampleRate(Rate);
@@ -406,23 +550,54 @@ private:
 			return;
 		}
 
-		const uint8* AudioData;
-		int32 AudioBytes;
+		// --- Latency measurement via Link beat clock ---
+		const int32 LatencyLogLevel = CVarLatencyLog.GetValueOnAnyThread();
+		if (LatencyLogLevel > 0)
+		{
+			const double Q = QuantumRef.load(std::memory_order_relaxed);
+			const auto Now = LinkRef.clock().micros();
+			const auto State = LinkRef.captureAudioSessionState();
+			const double NowBeats = State.beatAtTime(Now, Q);
+			const double Tempo = Handle.info.tempo;
+
+			const auto MappedBeats = Handle.info.beginBeats(State, Q);
+			if (Tempo > 0.0 && MappedBeats.has_value())
+			{
+				const double LatencyBeats = NowBeats - MappedBeats.value();
+				const double LatencyMs = (LatencyBeats / Tempo) * 60000.0;
+
+				// Level 1: accumulate for GameThread summary
+				LatencyStats.Record(LatencyMs);
+
+				// Level 2: per-callback log (high volume)
+				if (LatencyLogLevel >= 2)
+				{
+					UE_LOG(LogLink4UE, Log,
+						TEXT("Link4UE [RECV] '%s': SDK latency=%.1fms (%.3f beats, %.1f BPM, count=%llu, frames=%d)"),
+						*ChannelName, LatencyMs, LatencyBeats, Tempo,
+						Handle.info.count, SrcFrames);
+				}
+			}
+		}
+
+		// --- Resample (int16) ---
+		const int16* Int16Data;
+		int32 Frames;
 
 		const int32 DstRate = DeviceSampleRate.load(std::memory_order_relaxed);
 
 		if (SrcRate == DstRate)
 		{
-			AudioData = reinterpret_cast<const uint8*>(Handle.samples);
-			AudioBytes = SrcFrames * SrcChannels * sizeof(int16);
+			Int16Data = Handle.samples;
+			Frames = SrcFrames;
 		}
 		else
 		{
 			const double Ratio = static_cast<double>(SrcRate) / static_cast<double>(DstRate);
-			const int32 DstFrames = static_cast<int32>(SrcFrames / Ratio);
-			ResampleBuffer.SetNumUninitialized(DstFrames * SrcChannels, EAllowShrinking::No);
+			Frames = static_cast<int32>(SrcFrames / Ratio);
+			ResampleBuffer.SetNumUninitialized(Frames * SrcChannels, EAllowShrinking::No);
 
-			for (int32 DstFrame = 0; DstFrame < DstFrames; ++DstFrame)
+			for (int32 DstFrame = 0; DstFrame < Frames; ++DstFrame)
 			{
 				const double SrcPos = DstFrame * Ratio;
 				const int32 Idx0 = static_cast<int32>(SrcPos);
@@ -438,13 +613,12 @@ private:
 				}
 			}
 
-			AudioData = reinterpret_cast<const uint8*>(ResampleBuffer.GetData());
-			AudioBytes = DstFrames * SrcChannels * sizeof(int16);
+			Int16Data = ResampleBuffer.GetData();
 		}
 
-		// Push to all outputs with per-output channel conversion.
-		// Each output's Wave has a fixed channel count (1 or 2) determined by ChannelFormat.
-		// Incoming Link Audio data (SrcChannels) is converted to match at the Wave boundary.
+		const int32 TotalSrcSamples = Frames * SrcChannels;
+
+		// --- Push to all outputs with per-output channel conversion ---
 		FScopeLock Lock(&OutputsLock);
 		for (FOutput& Out : Outputs)
 		{
@@ -453,67 +627,60 @@ private:
 				continue;
 			}
 
-			const int32 WaveChannels = (Out.ChannelFormat == ELink4UEChannelFormat::Mono) ? 1 : 2;
-
-			// Overrun protection: allow up to 250ms of queued audio before reset.
-			// This must be generous enough to accommodate large incoming buffers
-			// (LinkAudio sources may deliver thousands of frames per callback).
-			const int32 Rate = DeviceSampleRate.load(std::memory_order_relaxed);
-			const int32 MaxLatencyFrames = Rate > 0 ? (Rate / 4) : 12000; // 250ms
-			const int32 OverrunThreshold = MaxLatencyFrames * WaveChannels * sizeof(int16);
-			const int32 QueuedBytes = Out.ProceduralSound->GetAvailableAudioByteCount();
-			if (QueuedBytes > OverrunThreshold)
+			FLink4UESoundGenerator* Gen = Out.ProceduralSound->GetGenerator();
+			if (!Gen)
 			{
-				Out.ProceduralSound->ResetAudio();
-				UE_LOG(LogLink4UE, Warning,
-					TEXT("Link4UE [RECV] '%s': overrun detected (%d bytes queued, threshold=%d) — reset"),
-					*ChannelName, QueuedBytes, OverrunThreshold);
+				continue; // Generator not yet created by mixer
 			}
+
+			const int32 WaveChannels = (Out.ChannelFormat == ELink4UEChannelFormat::Mono) ? 1 : 2;
 
 			if (SrcChannels == WaveChannels)
 			{
-				// Pass-through: channel count matches
-				Out.ProceduralSound->QueueAudio(AudioData, AudioBytes);
+				// Pass-through: convert int16→float and push
+				FloatConvertBuffer.SetNumUninitialized(TotalSrcSamples, EAllowShrinking::No);
+				constexpr float Scale = kInt16ToFloat;
+				for (int32 i = 0; i < TotalSrcSamples; ++i)
+				{
+					FloatConvertBuffer[i] = Int16Data[i] * Scale;
+				}
+				Gen->PushAudio(FloatConvertBuffer.GetData(), TotalSrcSamples);
 			}
 			else if (SrcChannels == 1 && WaveChannels == 2)
 			{
-				// Mono→Stereo: duplicate each sample to L and R (unity gain, DAW convention)
-				const int16* MonoData = reinterpret_cast<const int16*>(AudioData);
-				const int32 MonoSamples = AudioBytes / sizeof(int16);
-				MonoToStereoBuffer.SetNumUninitialized(MonoSamples * 2, EAllowShrinking::No);
-				for (int32 i = 0; i < MonoSamples; ++i)
+				// Mono→Stereo: duplicate + convert to float
+				const int32 OutSamples = Frames * 2;
+				FloatConvertBuffer.SetNumUninitialized(OutSamples, EAllowShrinking::No);
+				constexpr float Scale = kInt16ToFloat;
+				for (int32 i = 0; i < Frames; ++i)
 				{
-					MonoToStereoBuffer[i * 2]     = MonoData[i];
-					MonoToStereoBuffer[i * 2 + 1] = MonoData[i];
+					const float S = Int16Data[i] * Scale;
+					FloatConvertBuffer[i * 2]     = S;
+					FloatConvertBuffer[i * 2 + 1] = S;
 				}
-				Out.ProceduralSound->QueueAudio(
-					reinterpret_cast<const uint8*>(MonoToStereoBuffer.GetData()),
-					MonoSamples * 2 * sizeof(int16));
+				Gen->PushAudio(FloatConvertBuffer.GetData(), OutSamples);
 			}
 			else if (SrcChannels == 2 && WaveChannels == 1)
 			{
-				// Stereo→Mono: (L+R)/2 downmix
-				const int16* StereoData = reinterpret_cast<const int16*>(AudioData);
-				const int32 StereoSamples = AudioBytes / sizeof(int16);
-				const int32 MonoFrames = StereoSamples / 2;
-				StereoToMonoBuffer.SetNumUninitialized(MonoFrames, EAllowShrinking::No);
-				for (int32 i = 0; i < MonoFrames; ++i)
+				// Stereo→Mono: (L+R)/2 downmix + convert to float
+				FloatConvertBuffer.SetNumUninitialized(Frames, EAllowShrinking::No);
+				constexpr float Scale = kInt16ToFloat;
+				for (int32 i = 0; i < Frames; ++i)
 				{
-					const int32 L = StereoData[i * 2];
-					const int32 R = StereoData[i * 2 + 1];
-					StereoToMonoBuffer[i] = static_cast<int16>((L + R) / 2);
+					const int32 L = Int16Data[i * 2];
+					const int32 R = Int16Data[i * 2 + 1];
+					FloatConvertBuffer[i] = ((L + R) / 2) * Scale;
 				}
-				Out.ProceduralSound->QueueAudio(
-					reinterpret_cast<const uint8*>(StereoToMonoBuffer.GetData()),
-					MonoFrames * sizeof(int16));
+				Gen->PushAudio(FloatConvertBuffer.GetData(), Frames);
 			}
 		}
-
 	}
 
 	Audio::FDeviceId ActiveDeviceId = INDEX_NONE;
 	TArray<FOutput> Outputs;
 	FCriticalSection OutputsLock;
+	ableton::LinkAudio& LinkRef;
+	const std::atomic<double>& QuantumRef;
 	FString ChannelIdHex;
 	std::atomic<int32> DeviceSampleRate;
 	FString ChannelName;
@@ -521,9 +688,38 @@ private:
 	ableton::LinkAudioSource Source; // Must be last — destructor stops callback first
 
 	TArray<int16> ResampleBuffer;
-	TArray<int16> MonoToStereoBuffer;
-	TArray<int16> StereoToMonoBuffer;
+	TArray<float> FloatConvertBuffer;
 
+	// --- Latency stats (accumulated on SDK thread, drained on GameThread) ---
+	struct FLatencyStats
+	{
+		std::atomic<int64> SumUs{0};
+		std::atomic<int64> MaxUs{0};
+		std::atomic<int32> Count{0};
+
+		void Record(double LatencyMs)
+		{
+			const int64 Us = static_cast<int64>(LatencyMs * 1000.0);
+			SumUs.fetch_add(Us, std::memory_order_relaxed);
+			Count.fetch_add(1, std::memory_order_relaxed);
+			int64 CurMax = MaxUs.load(std::memory_order_relaxed);
+			while (Us > CurMax
+				&& !MaxUs.compare_exchange_weak(CurMax, Us, std::memory_order_relaxed))
+			{
+			}
+		}
+
+		bool Drain(double& OutAvgMs, double& OutMaxMs, int32& OutCount)
+		{
+			OutCount = Count.exchange(0, std::memory_order_relaxed);
+			if (OutCount == 0) return false;
+			const int64 Sum = SumUs.exchange(0, std::memory_order_relaxed);
+			OutMaxMs = MaxUs.exchange(0, std::memory_order_relaxed) / 1000.0;
+			OutAvgMs = (Sum / static_cast<double>(OutCount)) / 1000.0;
+			return true;
+		}
+	};
+	FLatencyStats LatencyStats;
 };
 
 // ---------------------------------------------------------------------------
@@ -1156,7 +1352,7 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		if (!Bridge)
 		{
 			LinkInstance->ActiveReceives.Add(MakeUnique<FLink4UEReceiveBridge>(
-				LinkInstance->Link, DC.Id, DeviceSampleRate, DC.Name));
+				LinkInstance->Link, DC.Id, DeviceSampleRate, DC.Name, Quantum));
 			Bridge = LinkInstance->ActiveReceives.Last().Get();
 		}
 		else
@@ -1492,6 +1688,42 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 				if (ActiveId != INDEX_NONE)
 				{
 					RecreateAudioOnDevice(ActiveId);
+				}
+			}
+		}
+	}
+
+	// Report flush events and latency stats from receive bridges
+	if (LinkInstance)
+	{
+		const int32 LatencyLogLevel = CVarLatencyLog.GetValueOnAnyThread();
+
+		for (auto& Bridge : LinkInstance->ActiveReceives)
+		{
+			// Flush count (always reported when it happens)
+			const int32 Flushed = Bridge->DrainFlushCount();
+			if (Flushed > 0)
+			{
+				UE_LOG(LogLink4UE, Warning,
+					TEXT("Link4UE: '%s' flushed %d time(s) — buffer overrun discarded"),
+					*Bridge->GetChannelName(), Flushed);
+			}
+
+			// Latency summary (level 1+, throttled to ~1 sec)
+			if (LatencyLogLevel >= 1)
+			{
+				LatencyLogAccum += DeltaTime;
+				if (LatencyLogAccum >= 1.0f)
+				{
+					LatencyLogAccum = 0.0f;
+					double AvgMs, MaxMs;
+					int32 Count;
+					if (Bridge->DrainLatencyStats(AvgMs, MaxMs, Count))
+					{
+						UE_LOG(LogLink4UE, Log,
+							TEXT("Link4UE [RECV] '%s': avg=%.1fms  max=%.1fms  (%d samples)"),
+							*Bridge->GetChannelName(), AvgMs, MaxMs, Count);
+					}
 				}
 			}
 		}

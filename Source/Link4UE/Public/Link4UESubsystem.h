@@ -289,6 +289,9 @@ private:
 	/** Previous beat floor — used for beat/phase-zero edge detection. */
 	int32 PrevBeatFloor = -1;
 
+	/** Accumulator for throttling latency summary log to ~1 sec. */
+	float LatencyLogAccum = 0.0f;
+
 	/** Opaque Link instance — forward declared to keep Link headers out of public API.
 	 *  Raw pointer because UHT-generated code instantiates TUniquePtr destructor
 	 *  in .gen.cpp where FLinkInstance is incomplete. */
