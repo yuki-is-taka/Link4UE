@@ -241,6 +241,41 @@ AudioCallbackBufferFrameSize=256
 
 > **macOS caveat:** The CoreAudio backend in UE hardcodes the audio callback buffer size to **1024 frames** regardless of `AudioCallbackBufferFrameSize`. This means on Mac the minimum achievable audio callback latency is ~21.3 ms at 48 kHz, compared to ~5.3 ms (256 frames) on Windows/iOS where the setting is respected. This is an engine limitation, not a Link4UE issue.
 
+### Jitter Buffer (Receive)
+
+The receive path includes a jitter buffer that absorbs network and scheduling jitter. The console variable `Link4UE.JitterBuffer` controls the operating mode:
+
+| Value | Mode | Behavior |
+|-------|------|----------|
+| **-1** (default) | Adaptive | Grows the buffer quickly on underrun, shrinks it slowly during stable periods |
+| **0** | Min latency | Fixed to 1 render cycle (lowest latency but vulnerable to underruns) |
+| **N** (positive int) | Fixed | Fixed target of N milliseconds |
+
+#### Adaptive Mode
+
+Adaptive mode uses **asymmetric adaptation**:
+
+- **Fast increase** — on underrun, the target grows by the deficit plus 1 render cycle of safety margin. The per-event increase is capped at 2 render cycles to prevent runaway growth under periodic jitter.
+- **Slow decrease** — after ~5 seconds of consecutive stable callbacks (no underruns), the target shrinks by 1/4 render cycle.
+- **Cold-start protection** — adaptation is disabled until the first audio data arrives.
+
+#### Buffer Bounds
+
+Example values at 48 kHz stereo with a 1024-frame callback (~21.3 ms):
+
+| Parameter | Value | Time |
+|-----------|-------|-----:|
+| Initial target | 2 render cycles | ~42.7 ms |
+| Min target | 1 render cycle | ~21.3 ms |
+| Max target | SampleRate × NumChannels / 2 | 500 ms |
+| Ring buffer capacity | SampleRate × NumChannels | 1 s |
+
+#### Consumer-Side Trim
+
+The producer (SDK callback) only pushes samples into the ring buffer and never manages buffer state. The consumer (`ISoundGenerator::OnGenerateAudio`) discards excess samples from the head of the buffer each callback, keeping the buffer level at the target and preventing latency accumulation.
+
+Trim events are counted via `TrimCount` and reported in log output.
+
 ### Runtime Controls
 
 | Function | Description |
