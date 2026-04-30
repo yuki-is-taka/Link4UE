@@ -22,8 +22,12 @@ public class Link4UE : ModuleRules
 				"AudioMixer",
 				"AudioExtensions",
 				"SignalProcessing",
-				"Settings",
 			}
 		);
+
+		if (Target.Type == TargetType.Editor)
+		{
+			PrivateDependencyModuleNames.Add("Settings");
+		}
 	}
 }
