@@ -12,6 +12,10 @@ public class LinkLibrary : ModuleRules
 		PublicSystemIncludePaths.Add(Path.Combine(ModuleDirectory, "link", "modules", "asio-standalone", "asio", "include"));
 
 		// Platform defines (must match Link's AbletonLinkConfig.cmake)
+		// ASIO's asio_signal_handler is extern "C" and collides with UE's TraceAnalysis module.
+		// Rename the symbol at preprocessor level to avoid linker duplicate.
+		PublicDefinitions.Add("asio_signal_handler=link4ue_asio_signal_handler");
+
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PublicDefinitions.Add("LINK_PLATFORM_WINDOWS=1");
