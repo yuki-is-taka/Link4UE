@@ -1,3 +1,10 @@
+---
+description: Why a Sink (send) is mandatory for any Source (receive) to work in Link Audio — SDK peer-discovery protocol, source-code evidence, and Link4UE's auto Master Sink; read when receive audio fails with no sink or when touching Master Sink / peer-discovery code.
+type: decision
+status: implemented
+updated: 2026-03-08
+---
+
 # Link Audio SDK — Sink and Peer Discovery Mechanics
 
 > Date: 2026-03-08

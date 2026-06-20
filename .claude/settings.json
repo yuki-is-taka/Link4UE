@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"$CLAUDE_PROJECT_DIR/Docs/_capture-protocol.md\" 2>/dev/null"
+          }
+        ]
+      }
+    ]
+  }
+}

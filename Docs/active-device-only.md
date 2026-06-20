@@ -1,3 +1,10 @@
+---
+description: Why Link4UE tracks a single active AudioDevice and recreates audio routes on PIE/editor device transitions; read when PIE-end kills editor audio or when touching device-transition / route-recreation logic.
+type: decision
+status: implemented
+updated: 2026-03-10
+---
+
 # Active Device Only Architecture — PIE Audio Survival
 
 > Status: **Implemented** — ba4b1ed (2026-03-10)

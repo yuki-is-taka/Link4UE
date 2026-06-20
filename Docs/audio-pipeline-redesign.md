@@ -1,3 +1,10 @@
+---
+description: Link4UE audio pipeline design using USoundWaveProcedural buffer injection (receive) and ISubmixBufferListener (send) — architecture, settings, ReceiveBridge lifetime/diff-rebuild/resampling; read before working on audio routing, channel bridges, or resampling.
+type: design
+status: implemented
+updated: 2026-03-08
+---
+
 # Audio Pipeline Redesign — SoundWaveProcedural Approach
 
 > Status: **Implemented** — Phases 1–3 complete, integration tested
