@@ -5,6 +5,7 @@
 #if WITH_EDITOR
 #include "ISettingsModule.h"
 #endif
+#include "Misc/App.h"
 #include "AudioDevice.h"
 #include "AudioDeviceManager.h"
 #include "ISubmixBufferListener.h"
@@ -1138,11 +1139,22 @@ void ULink4UESubsystem::RebuildAudioSends()
 		return;
 	}
 
+	// A commandlet (the cook), a dedicated server, or -nosound never builds an FAudioDeviceManager
+	// at all (FAudioDeviceManager::Get checks FApp::CanEverRenderAudio). There is no device to wait
+	// for, so deferring would just leave the flag set until shutdown. Bail without arming a retry.
+	if (!FApp::CanEverRenderAudio())
+	{
+		return;
+	}
+
 	FAudioDevice* AudioDevice = GetActiveDevice();
 	if (!AudioDevice)
 	{
+		// Expected on a cold boot: this UEngineSubsystem initializes well before the audio mixer,
+		// and OnAudioDeviceCreated fires before the new device becomes the ACTIVE one. Tick retries
+		// and logs when it lands, so this is the normal path, not a fault.
 		bSendRoutesPending = true;
-		UE_LOG(LogLink4UE, Warning,
+		UE_LOG(LogLink4UE, Log,
 			TEXT("Link4UE: Audio device not ready, send routes deferred"));
 		return;
 	}
@@ -1298,11 +1310,18 @@ void ULink4UESubsystem::RebuildAudioReceives()
 		return;
 	}
 
+	// See RebuildAudioSends: no FAudioDeviceManager is ever created in these processes, so there is
+	// nothing to defer to.
+	if (!FApp::CanEverRenderAudio())
+	{
+		return;
+	}
+
 	FAudioDevice* ActiveDevice = GetActiveDevice();
 	if (!ActiveDevice)
 	{
 		bReceiveRoutesPending = true;
-		UE_LOG(LogLink4UE, Warning,
+		UE_LOG(LogLink4UE, Log,
 			TEXT("Link4UE: No audio device available, receive routes deferred"));
 		return;
 	}

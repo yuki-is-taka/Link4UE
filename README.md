@@ -43,7 +43,7 @@ The `--recursive` flag is required because Ableton Link itself contains a submod
 
 Open **Project Settings > Plugins > Link4UE**.
 
-Settings appear in the Project Settings UI but are stored per-user in `Saved/Config/{Platform}/EditorPerProjectUserSettings.ini` (not version-controlled). This means each team member has their own Link4UE configuration — changing settings does not affect other users' setups.
+Settings appear in the Project Settings UI but are stored per-user in `Saved/Config/{Platform}/EditorPerProjectUserSettings.ini` (not version-controlled). This means each team member has their own Link4UE configuration — changing settings does not affect other users' setups. Packaged builds read the same branch from their own `Saved/Config/` — see [Config Persistence](#config-persistence).
 
 ### Connection
 
@@ -71,6 +71,22 @@ Settings appear in the Project Settings UI but are stored per-user in `Saved/Con
 ### Config Persistence
 
 All settings listed above are `UPROPERTY(Config)` and stored in `EditorPerProjectUserSettings.ini`.
+
+**These settings DO apply to packaged builds** — despite the name, `EditorPerProjectUserSettings` is
+just a config branch, not an editor-only one. A packaged build reads it from its own
+`<Package>/<Project>/Saved/Config/<Platform>/EditorPerProjectUserSettings.ini`, next to the executable.
+That file does not exist until you create it, which is why a fresh package starts with Link disabled —
+the settings are not missing, the machine simply has none yet. Verified on Windows 2026-07-17: dropping
+a `[/Script/Link4UE.Link4UESubsystem]` section with `bEnableLinkAudio=True` there made a packaged build
+register `Link4UE_Send_Main` on the master submix; without the file, Link4UE logs nothing at all.
+
+Do not "fix" this by moving to `UCLASS(Config = Link4UE)`. That was the original design, changed by
+d7d171a on the stated grounds that `Config=Link4UE` wrote to `Config/DefaultGame.ini` and got submitted
+to Perforce. That reasoning was wrong — p4 history shows `DefaultGame.ini` was untouched between
+2026-02-02 and 2026-07-17 and never carried a Link4UE section — but the destination is right anyway:
+the current branch is per-machine, outside version control, and readable in a package, which is exactly
+what is wanted. A per-machine config that is also baked into the package is a contradiction; shipping
+means cook-time, and per-machine-untracked means outside the tracked tree.
 
 | Edit method | Saved to ini? | Editor UI updated? |
 |-------------|---------------|-------------------|
