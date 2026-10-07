@@ -2,7 +2,7 @@
 
 Ableton Link + Link Audio integration for Unreal Engine: shared tempo/beat/phase, transport (start/stop) sync, and real-time audio channel streaming across Link peers on the local network.
 
-Git-managed (independent repo). Use `git`, not `p4`. Contains Ableton Link as a submodule (which itself nests ASIO) — initialize with `--recursive`; do NOT modify the submodule. GPLv2+ licensed. Never commit without explicit user approval.
+Git-managed (independent repo). Use `git`, not `p4`. Contains Ableton Link as a submodule (which itself nests ASIO) — initialize with `--recursive`; do NOT modify the submodule. GPLv2+ licensed. Local commits on your own feature branch are allowed. Committing to or merging into `main`, and every push, need explicit user approval each time (same policy as p4 submit). Landing procedure: root `CLAUDE.md`, "Landing a change".
 
 ## Notes
 - Modules: `Link4UE`, `Link4UEEditor`.
