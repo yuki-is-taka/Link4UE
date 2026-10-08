@@ -1673,6 +1673,8 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 
 	const double Q = Quantum.load(std::memory_order_relaxed);
 	const auto Now = LinkInstance->Link.clock().micros();
+	// Read beside Now: Beat and Phase below are evaluated at Now, so this is the engine time they hold at.
+	const double CaptureTime = FPlatformTime::Seconds();
 	const auto State = LinkInstance->Link.captureAppSessionState();
 
 	Snapshot.Tempo = State.tempo();
@@ -1681,6 +1683,7 @@ bool ULink4UESubsystem::Tick(float DeltaTime)
 	Snapshot.bIsPlaying = State.isPlaying();
 	Snapshot.NumPeers = static_cast<int32>(LinkInstance->Link.numPeers());
 	Snapshot.Quantum = Q;
+	Snapshot.CaptureTime = CaptureTime;
 
 	// Beat / Phase-zero edge detection
 	const int32 CurBeatFloor = FMath::FloorToInt32(Snapshot.Beat);
