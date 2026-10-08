@@ -130,6 +130,7 @@ The subsystem (`ULink4UESubsystem`) is an Engine Subsystem. Access it from Bluep
 | bIsPlaying | bool | Transport state (requires Start/Stop Sync) |
 | NumPeers | int32 | Number of connected peers (excluding self) |
 | Quantum | double | Current quantum value in beats |
+| CaptureTime | double | Engine time (`FPlatformTime::Seconds()`) the Beat and Phase were sampled at; extrapolate with Tempo for a later time |
 
 ### Events
 

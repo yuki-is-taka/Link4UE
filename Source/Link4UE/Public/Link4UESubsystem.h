@@ -37,6 +37,14 @@ struct LINK4UE_API FLink4UESessionSnapshot
 	/** Quantum used for beat/phase calculation. */
 	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
 	double Quantum = 4.0;
+
+	/**
+	 * FPlatformTime::Seconds() read beside the Link clock sample that Beat and Phase were evaluated at; 0 until the
+	 * first capture. While Tempo holds, the beat at a later platform time T is Beat + (T - CaptureTime) * Tempo / 60,
+	 * so a reader can place beat crossings at exact engine times without mapping Link's clock to the engine's.
+	 */
+	UPROPERTY(BlueprintReadOnly, Category = "Link4UE")
+	double CaptureTime = 0.0;
 };
 
 /** Describes an audio channel visible in the Link Audio session. */
